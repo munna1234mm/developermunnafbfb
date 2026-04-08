@@ -1413,19 +1413,3 @@ app.post("/api/tools/scraper-session/send-code", (req, res) => { const u = getSe
 app.get("*", (req, res) => {
   res.sendFile(path.join(frontendPath, "index.html"));
 });
-
-app.listen(PORT, () => {
-  console.log("\n╔══════════════════════════════════════════╗");
-  console.log("║       HIT CHECKER BACKEND STARTED        ║");
-  console.log("╠══════════════════════════════════════════╣");
-  console.log(`║  URL:  http://localhost:${PORT}              ║`);
-  console.log(`║  Bot:  @${CONFIG.BOT_USERNAME.padEnd(32)}║`);
-  console.log("╠══════════════════════════════════════════╣");
-  console.log("║  ✅  Cookie auth + Hitter endpoints      ║");
-  console.log("║  ✅  Persistent sessions (data.json)     ║");
-  console.log("║  ✅  Telegram Bot Listener Active        ║");
-  console.log("╚══════════════════════════════════════════╝\n");
-
-  // Start the Telegram bot listener loop
-  startBotListener();
-});
