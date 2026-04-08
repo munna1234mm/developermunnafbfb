@@ -164,6 +164,15 @@ async function saveDB() {
     
     // Save to Firebase for persistence across deploys
     const dbRef = ref(db, "system");
+    DB.users = cloudDB.users || {};
+    DB.sessions = {}; 
+    DB.history = cloudDB.history || [];
+    DB.bins = cloudDB.bins || {};
+    DB.gateways = cloudDB.gateways || DEFAULT_GATEWAYS;
+    DB.botConfig = cloudDB.botConfig || { groupId: "-100", logsGroupId: "-100", groupLink: "", channelLink: "" };
+    DB.botSettings = cloudDB.botSettings || { mass_check_enabled: true, inline_mass_limit: 10, file_mass_limit: 100 };
+    DB.blacklistedBins = cloudDB.blacklistedBins || [];
+    DB.maintenance = cloudDB.maintenance || false;
     await set(dbRef, DB);
   } catch (e) {
     console.error("Firebase Save Error:", e.message);
@@ -994,10 +1003,21 @@ app.post("/api/tools/generate", async (req, res) => {
 });
 
 app.post("/api/tools/filter", async (req, res) => {
+  const start = Date.now();
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
-  const { cards } = req.body;
+
+  const { cards, gateway } = req.body;
   if (!cards || !Array.isArray(cards)) return res.status(400).json({ error: "Cards required" });
+
+  // BIN Blacklist Check
+  const blacklisted = cards.filter(c => {
+    const bin = c.split("|")[0].slice(0, 6);
+    return (DB.blacklistedBins || []).includes(bin);
+  });
+  if (blacklisted.length > 0) {
+    return res.status(403).json({ error: `BLACKLISTED_BINS_DETECTED: ${blacklisted.join(", ")}` });
+  }
 
   const byBin = {}, byType = {}, byCountry = {}, bins = {}, types = {}, countries = {}, binInfoMap = {};
   for (const card of cards) {
@@ -1028,6 +1048,11 @@ app.post("/api/tools/stripe-co", async (req, res) => {
 
   const { checkoutUrl, card, sessionCache } = req.body;
   if (!checkoutUrl || !card) return res.status(400).json({ error: "checkoutUrl and card required" });
+
+  const bin = card.split("|")[0].slice(0, 6);
+  if ((DB.blacklistedBins || []).includes(bin)) {
+    return res.status(403).json({ error: "BLACKLISTED_BIN" });
+  }
 
   user.dailyUsage.hitterHits++;
   await saveDB();
@@ -1558,6 +1583,85 @@ app.post("/api/admin/referral/credit", (req, res) => {
   
   saveDB();
   res.json({ success: true, credited: creditAmount, newBalance: target.referral.balance });
+});
+
+// ── ADVANCED ADMIN TOOLS ──
+
+// Global Broadcast
+app.post("/api/admin/broadcast", async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user || !user.isAdmin) return res.status(403).json({ error: "Forbidden" });
+
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "message required" });
+
+  const userIds = Object.keys(DB.users);
+  let successCount = 0;
+  let failCount = 0;
+
+  res.json({ success: true, message: `Broadcast started for ${userIds.length} users.` });
+
+  // Process in background
+  for (const uid of userIds) {
+    try {
+      await sendTelegramMessage(uid, `📣 <b>GLOBAL ANNOUNCEMENT</b>\n\n${message}`);
+      successCount++;
+      await new Promise(r => setTimeout(r, 100)); // Avoid rate limit
+    } catch {
+      failCount++;
+    }
+  }
+  
+  console.log(`📡 Broadcast finished: ${successCount} sent, ${failCount} failed.`);
+});
+
+// BIN Blacklist Management
+app.get("/api/admin/blacklist-bins", (req, res) => {
+  const user = getSessionUser(req);
+  if (!user || !user.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  res.json({ bins: DB.blacklistedBins || [] });
+});
+
+app.post("/api/admin/blacklist-bins", (req, res) => {
+  const user = getSessionUser(req);
+  if (!user || !user.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  
+  const { bin } = req.body;
+  if (!bin) return res.status(400).json({ error: "bin required" });
+  
+  if (!DB.blacklistedBins) DB.blacklistedBins = [];
+  if (!DB.blacklistedBins.includes(bin)) DB.blacklistedBins.push(bin);
+  
+  saveDB();
+  res.json({ success: true, bins: DB.blacklistedBins });
+});
+
+app.delete("/api/admin/blacklist-bins", (req, res) => {
+  const user = getSessionUser(req);
+  if (!user || !user.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  
+  const { bin } = req.body;
+  DB.blacklistedBins = (DB.blacklistedBins || []).filter(b => b !== bin);
+  
+  saveDB();
+  res.json({ success: true, bins: DB.blacklistedBins });
+});
+
+// Recent Activity Monitoring
+app.get("/api/admin/recent-activity", (req, res) => {
+  const user = getSessionUser(req);
+  if (!user || !user.isAdmin) return res.status(403).json({ error: "Forbidden" });
+  
+  // Get last 20 jobs from all history
+  const activity = DB.history.slice(-20).reverse().map(j => ({
+    userId: j.userId,
+    jobId: j.jobId,
+    total: j.total,
+    status: j.status,
+    timestamp: new Date().toISOString() // In a real case, we'd store the timestamp
+  }));
+  
+  res.json(activity);
 });
 app.post("/api/admin/export-snapshot", (req, res) => { const u = getSessionUser(req); if (!u || !u.isAdmin) return res.status(403).json({ error: "Forbidden" }); res.json(DB); });
 app.get("/api/tools/scraper-session-status", (req, res) => { const u = getSessionUser(req); if (!u || !u.isAdmin) return res.status(403).json({ error: "Forbidden" }); res.json({ hasSession: false }); });
