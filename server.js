@@ -10,6 +10,28 @@ const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
 puppeteer.use(StealthPlugin());
 
+// Hitter Concurrency Control
+const hitterSemaphore = {
+  currentHits: 0,
+  maxConcurrent: 1, // Only 1 browser session at a time on Render
+  queue: [],
+  async acquire() {
+    if (this.currentHits < this.maxConcurrent) {
+      this.currentHits++;
+      return Promise.resolve();
+    }
+    return new Promise(resolve => this.queue.push(resolve));
+  },
+  release() {
+    this.currentHits--;
+    if (this.queue.length > 0) {
+      this.currentHits++;
+      const next = this.queue.shift();
+      next();
+    }
+  }
+};
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 let serverStarted = false;
@@ -1013,11 +1035,16 @@ app.post("/api/tools/stripe-co", async (req, res) => {
 
   user.dailyUsage.hitterHits++;
   await saveDB();
-
-  const result = await hitStripeCheckout(checkoutUrl, card, user);
-  if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
-  if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(checkoutUrl);
-  res.json(result);
+  
+  await hitterSemaphore.acquire();
+  try {
+    const result = await hitStripeCheckout(checkoutUrl, card, user);
+    if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
+    if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(checkoutUrl);
+    res.json(result);
+  } finally {
+    hitterSemaphore.release();
+  }
 });
 
 app.post("/api/tools/stripe-invoice", async (req, res) => {
@@ -1035,11 +1062,16 @@ app.post("/api/tools/stripe-invoice", async (req, res) => {
 
   user.dailyUsage.hitterHits++;
   await saveDB();
-
-  const result = await hitStripeCheckout(invoiceUrl, card, user);
-  if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
-  if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(invoiceUrl);
-  res.json(result);
+  
+  await hitterSemaphore.acquire();
+  try {
+    const result = await hitStripeCheckout(invoiceUrl, card, user);
+    if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
+    if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(invoiceUrl);
+    res.json(result);
+  } finally {
+    hitterSemaphore.release();
+  }
 });
 
 app.post("/api/tools/stripe-billing", async (req, res) => {
@@ -1057,11 +1089,16 @@ app.post("/api/tools/stripe-billing", async (req, res) => {
 
   user.dailyUsage.hitterHits++;
   saveDB();
-
-  const result = await hitStripeCheckout(billingUrl, card, user);
-  if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
-  if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(billingUrl);
-  res.json(result);
+  
+  await hitterSemaphore.acquire();
+  try {
+    const result = await hitStripeCheckout(billingUrl, card, user);
+    if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
+    if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(billingUrl);
+    res.json(result);
+  } finally {
+    hitterSemaphore.release();
+  }
 });
 
 // ── HITTER HISTORY ──
