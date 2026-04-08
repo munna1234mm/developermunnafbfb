@@ -327,7 +327,8 @@ async function handleBotMessage(msg) {
     const cmd = text.split(" ")[0].toLowerCase().substring(1);
 
     if (cmd === "start") {
-      const welcomeMsg = `👋 <b>Welcome to HIT Checker!</b>\n\nYour User ID: <code>${userId}</code>\nRole: <b>${user.tier.toUpperCase()}</b>\n\n🔗 <b>Dashboard:</b> http://localhost:3001\n\nUse commands to select gateways or just send a card string!`;
+      const host = DB.botConfig.dashboardUrl || `http://localhost:3001`; 
+      const welcomeMsg = `👋 <b>Welcome to HIT Checker!</b>\n\nYour User ID: <code>${userId}</code>\nRole: <b>${user.tier.toUpperCase()}</b>\n\n🔗 <b>Dashboard:</b> ${host}\n\nUse commands to select gateways or just send a card string!`;
       return sendTelegramMessage(chatId, welcomeMsg);
     }
 
@@ -1063,7 +1064,8 @@ app.get("/api/bot/config", (req, res) => {
     adminId: CONFIG.ADMIN_IDS.join(","),
     groupId: DB.botConfig.groupId,
     groupLink: DB.botConfig.groupLink,
-    channelLink: DB.botConfig.channelLink
+    channelLink: DB.botConfig.channelLink,
+    dashboardUrl: DB.botConfig.dashboardUrl || ""
   });
 });
 
@@ -1071,11 +1073,12 @@ app.put("/api/bot/config", (req, res) => {
   const u = getSessionUser(req);
   if (!u || !u.isAdmin) return res.status(403).json({ error: "Forbidden" });
   
-  const { groupId, groupLink, channelLink, logsGroupId } = req.body;
+  const { groupId, groupLink, channelLink, logsGroupId, dashboardUrl } = req.body;
   if (groupId !== undefined) DB.botConfig.groupId = groupId;
   if (groupLink !== undefined) DB.botConfig.groupLink = groupLink;
   if (channelLink !== undefined) DB.botConfig.channelLink = channelLink;
   if (logsGroupId !== undefined) DB.botConfig.logsGroupId = logsGroupId;
+  if (dashboardUrl !== undefined) DB.botConfig.dashboardUrl = dashboardUrl;
   
   saveDB();
   res.json({ success: true });
