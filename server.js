@@ -314,12 +314,17 @@ function tierLimits(tier) {
 // ──────────────────────────────────────────────
 // Telegram Helpers
 // ──────────────────────────────────────────────
-async function sendTelegramMessage(chatId, text) {
+async function sendTelegramMessage(chatId, text, disablePreview = false) {
   const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/sendMessage`;
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+    body: JSON.stringify({ 
+      chat_id: chatId, 
+      text, 
+      parse_mode: "HTML",
+      disable_web_page_preview: disablePreview
+    }),
   });
   return res.json();
 }
@@ -349,7 +354,7 @@ async function notifyHitInGroup(user, gatewayName, card, result) {
 [${result.elapsed}s]
 <a href="https://t.me/superhitbdrobot/bd_superhits">Open HIT Checker</a>`;
 
-  return sendTelegramMessage(logsGroupId, msg).catch(e => console.error("Notification Error:", e.message));
+  return sendTelegramMessage(logsGroupId, msg, true).catch(e => console.error("Notification Error:", e.message));
 }
 
 // ──────────────────────────────────────────────
@@ -836,7 +841,15 @@ app.get("/api/check/batch/:jobId", (req, res) => {
   if (!user) return res.status(401).json({ error: "Unauthorized" });
   const job = DB.history.find((j) => j.jobId === req.params.jobId && j.userId === user.userId);
   if (!job) return res.status(404).json({ error: "Not found" });
-  res.json(job);
+  
+  const after = parseInt(req.query.after || "0");
+  const filteredResults = job.results.slice(0, Math.max(0, job.results.length - after));
+
+  res.json({
+    ...job,
+    results: filteredResults,
+    allResultsCount: job.results.length
+  });
 });
 
 // ── TOOLS ──
