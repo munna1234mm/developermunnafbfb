@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "postinstall": "npx puppeteer browsers install chrome --cache-dir .cache/puppeteer"
   },
   "dependencies": {
     "cors": "^2.8.5",
