@@ -516,7 +516,7 @@ function parseCreditCard(cardStr) {
 // ──────────────────────────────────────────────
 // Stripe hitter simulation
 // ──────────────────────────────────────────────
-async function hitStripeCheckout(checkoutUrl, card) {
+async function hitStripeCheckout(checkoutUrl, card, user = null) {
   const start = Date.now();
   
   // Simulation: If captcha keys are present, speed up or change message
@@ -536,9 +536,10 @@ async function hitStripeCheckout(checkoutUrl, card) {
     "Generic Decline",
     "Card Declined",
     "Restricted Card",
+    "Stolen Card",
   ];
 
-  if (rand < 0.10) { // Increased success rate for testing
+  if (rand < 0.15) { // Success rate
     const result = {
       status: "charged",
       message: hasCaptchaSolver ? "Charged Successfully (3DS Bypassed + Captcha Solved)" : "Charged Successfully (3DS Bypassed)",
@@ -553,12 +554,11 @@ async function hitStripeCheckout(checkoutUrl, card) {
     
     // LOG TO TELEGRAM if logsGroupId is set
     if (DB.botConfig.logsGroupId) {
-       const user = getSessionUser(req);
        notifyHitInGroup(user, "Stripe Checkout", card, result);
     }
     
     return result;
-  } else if (rand < 0.20) {
+  } else if (rand < 0.25) {
     return { status: "live", message: "3DS Authentication Required", elapsed };
   } else {
     const msg = declineMessages[Math.floor(Math.random() * declineMessages.length)];
@@ -904,7 +904,7 @@ app.post("/api/tools/stripe-co", async (req, res) => {
   user.dailyUsage.hitterHits++;
   await saveDB();
 
-  const result = await hitStripeCheckout(checkoutUrl, card);
+  const result = await hitStripeCheckout(checkoutUrl, card, user);
   if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
   if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(checkoutUrl);
   res.json(result);
@@ -926,7 +926,7 @@ app.post("/api/tools/stripe-invoice", async (req, res) => {
   user.dailyUsage.hitterHits++;
   await saveDB();
 
-  const result = await hitStripeCheckout(invoiceUrl, card);
+  const result = await hitStripeCheckout(invoiceUrl, card, user);
   if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
   if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(invoiceUrl);
   res.json(result);
@@ -948,7 +948,7 @@ app.post("/api/tools/stripe-billing", async (req, res) => {
   user.dailyUsage.hitterHits++;
   saveDB();
 
-  const result = await hitStripeCheckout(billingUrl, card);
+  const result = await hitStripeCheckout(billingUrl, card, user);
   if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
   if (result.session_cache) result.session_cache.merchant = result.session_cache.merchant || extractMerchant(billingUrl);
   res.json(result);
