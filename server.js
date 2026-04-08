@@ -327,8 +327,7 @@ async function handleBotMessage(msg) {
     const cmd = text.split(" ")[0].toLowerCase().substring(1);
 
     if (cmd === "start") {
-      const host = DB.botConfig.dashboardUrl || `http://localhost:3001`; 
-      const welcomeMsg = `👋 <b>Welcome to HIT Checker!</b>\n\nYour User ID: <code>${userId}</code>\nRole: <b>${user.tier.toUpperCase()}</b>\n\n🔗 <b>Dashboard:</b> ${host}\n\nUse commands to select gateways or just send a card string!`;
+      const welcomeMsg = `👋 <b>Welcome to HIT Checker!</b>\n\nYour User ID: <code>${userId}</code>\nRole: <b>${user.tier.toUpperCase()}</b>\n\nUse commands to select gateways or just send a card string!`;
       return sendTelegramMessage(chatId, welcomeMsg);
     }
 
