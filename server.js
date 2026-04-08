@@ -19,7 +19,24 @@ const CONFIG = {
   OTP_EXPIRE_MINUTES: 5,
   SESSION_COOKIE: "hc_session",
   DATA_FILE: path.join(__dirname, "data.json"),
+  FIREBASE: {
+    apiKey: "AIzaSyBuPQNU8RmGgWYZj26nXZ91IiJ-9vbkw-I",
+    authDomain: "superhits-21624.firebaseapp.com",
+    projectId: "superhits-21624",
+    storageBucket: "superhits-21624.firebasestorage.app",
+    messagingSenderId: "397477606062",
+    appId: "1:397477606062:web:b21f7bdabe42c3a1ca733f",
+    measurementId: "G-RWLBSDJDTH",
+    databaseURL: "https://superhits-21624-default-rtdb.firebaseio.com/"
+  }
 };
+
+// Initialize Firebase
+const { initializeApp: firebaseInit } = require("firebase/app");
+const { getDatabase, ref, set, get, child, update: firebaseUpdate, onValue } = require("firebase/database");
+
+const firebaseApp = firebaseInit(CONFIG.FIREBASE);
+const db = getDatabase(firebaseApp);
 
 // Log buffer for admin panel
 const botLogs = [];
@@ -87,24 +104,42 @@ let DB = {
   captchaaiKey: "",
 };
 
-function loadDB() {
+async function loadDB() {
   try {
+    // 1. Try local data first (for speed/fallback)
     if (fs.existsSync(CONFIG.DATA_FILE)) {
       const saved = JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, "utf8"));
-      // Merge onto defaults so new fields always exist
       DB = Object.assign(DB, saved);
-      if (!DB.botSettings) DB.botSettings = { mass_check_enabled: true, inline_mass_limit: 10, file_mass_limit: 300 };
-      if (!DB.botConfig) DB.botConfig = { groupId: "", groupLink: "", channelLink: "", logsGroupId: "" };
+    }
+    
+    // 2. Fetch from Firebase for persistence
+    console.log("☁️  Fetching data from Firebase...");
+    const dbRef = ref(db);
+    const snapshot = await get(child(dbRef, "system"));
+    if (snapshot.exists()) {
+      const cloudData = snapshot.val();
+      DB = Object.assign(DB, cloudData);
+      console.log("✅ Data loaded from Firebase");
+    } else {
+      console.log("ℹ️ No data in Firebase. Starting fresh.");
+      await saveDB(); // Initialize cloud with defaults
     }
   } catch (e) {
     console.log("DB load error:", e.message);
   }
 }
 
-function saveDB() {
+async function saveDB() {
   try {
+    // Save to local for fast access
     fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(DB, null, 2));
-  } catch (e) {}
+    
+    // Save to Firebase for persistence across deploys
+    const dbRef = ref(db, "system");
+    await set(dbRef, DB);
+  } catch (e) {
+    console.error("Firebase Save Error:", e.message);
+  }
 }
 
 // Returns live gateway list (DB overrides DEFAULT if set)
@@ -112,23 +147,40 @@ function getGateways() {
   return DB.gateways || DEFAULT_GATEWAYS;
 }
 
-loadDB();
+loadDB().then(() => {
+  // ── MAINTENANCE MIDDLEWARE ──
+  // Blocks non-admin users when maintenance mode is ON
+  app.use((req, res, next) => {
+    if (!DB.maintenance) return next();
+    // Allow API and assets to pass through for admin
+    const bypass = ["/api/auth/", "/api/maintenance", "/assets/", "/favicon"];
+    if (bypass.some((p) => req.path.startsWith(p))) return next();
+    // Allow admin through
+    const user = getSessionUser(req);
+    if (user && user.isAdmin) return next();
+    // Block API calls
+    if (req.path.startsWith("/api/")) {
+      return res.status(503).json({ error: "maintenance", message: "App is under maintenance" });
+    }
+    next(); // Let SPA handle maintenance popup
+  });
 
-// ── MAINTENANCE MIDDLEWARE ──
-// Blocks non-admin users when maintenance mode is ON
-app.use((req, res, next) => {
-  if (!DB.maintenance) return next();
-  // Allow API and assets to pass through for admin
-  const bypass = ["/api/auth/", "/api/maintenance", "/assets/", "/favicon"];
-  if (bypass.some((p) => req.path.startsWith(p))) return next();
-  // Allow admin through
-  const user = getSessionUser(req);
-  if (user && user.isAdmin) return next();
-  // Block API calls
-  if (req.path.startsWith("/api/")) {
-    return res.status(503).json({ error: "maintenance", message: "App is under maintenance" });
-  }
-  next(); // Let SPA handle maintenance popup
+  // Start server after DB load
+  app.listen(PORT, () => {
+    console.log(`
+╔══════════════════════════════════════════╗
+║       HIT CHECKER BACKEND STARTED        ║
+╠══════════════════════════════════════════╣
+║  URL:  http://localhost:${PORT}              ║
+║  Bot:  @${CONFIG.BOT_USERNAME}                 ║
+╠══════════════════════════════════════════╣
+║  ✅  Cookie auth + Hitter endpoints      ║
+║  ✅  Persistent cloud (Firebase RTDB)    ║
+║  ✅  Telegram Bot Listener Active        ║
+╚══════════════════════════════════════════╝
+`);
+    startBotListener();
+  });
 });
 
 // ──────────────────────────────────────────────
@@ -333,7 +385,7 @@ async function handleBotMessage(msg) {
   // 1. Ensure user exists
   if (!DB.users[userId]) {
     DB.users[userId] = newUser(msg.from);
-    saveDB();
+    await saveDB();
     console.log(`🆕 New user registered via bot: ${userId}`);
   }
 
@@ -353,7 +405,7 @@ async function handleBotMessage(msg) {
     const gw = gateways.find(g => g.id === cmd);
     if (gw) {
       user.lastGateway = gw.id;
-      saveDB();
+      await saveDB();
       return sendTelegramMessage(chatId, `✅ <b>Gateway Selected:</b> ${gw.name}\n\nNow send your card in format: <code>CC|MM|YY|CVV</code>`);
     }
 
@@ -557,7 +609,7 @@ app.post("/api/auth/request-otp", async (req, res) => {
   res.json({ success: true, message: "OTP sent to your Telegram" });
 });
 
-app.post("/api/auth/verify-otp", (req, res) => {
+app.post("/api/auth/verify-otp", async (req, res) => {
   const userId = String(req.body.userId || "").trim();
   const otp = String(req.body.otp || "").trim();
 
@@ -577,7 +629,7 @@ app.post("/api/auth/verify-otp", (req, res) => {
 
   const token = generateToken();
   DB.sessions[token] = userId;
-  saveDB();
+  await saveDB();
 
   // Set cookie
   setCookie(res, token);
@@ -613,16 +665,16 @@ app.get("/api/auth/session", (req, res) => {
   });
 });
 
-app.post("/api/auth/logout", (req, res) => {
+app.post("/api/auth/logout", async (req, res) => {
   const cookies = parseCookies(req);
   const token = cookies[CONFIG.SESSION_COOKIE] || req.headers["authorization"]?.replace("Bearer ", "");
-  if (token) { delete DB.sessions[token]; saveDB(); }
+  if (token) { delete DB.sessions[token]; await saveDB(); }
   clearCookie(res);
   res.json({ success: true });
 });
 
 // ── USER ──
-app.get("/api/user/dashboard", (req, res) => {
+app.get("/api/user/dashboard", async (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
   resetDailyIfNeeded(user);
@@ -662,11 +714,11 @@ app.get("/api/user/settings", (req, res) => {
   res.json(user.settings || {});
 });
 
-app.post("/api/user/settings", (req, res) => {
+app.post("/api/user/settings", async (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
   user.settings = { ...(user.settings || {}), ...req.body };
-  saveDB();
+  await saveDB();
   res.json({ success: true });
 });
 
@@ -685,7 +737,7 @@ app.get("/api/checker/gateways", (req, res) => {
 });
 
 // ── CHECK / BATCH ──
-app.post("/api/check/batch", (req, res) => {
+app.post("/api/check/batch", async (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
 
@@ -709,29 +761,64 @@ app.post("/api/check/batch", (req, res) => {
   DB.history.unshift(job);
   if (DB.history.length > 50) DB.history = DB.history.slice(0, 50);
   user.dailyUsage.checks += cards.length;
-  saveDB();
+  await saveDB();
 
-  setTimeout(() => {
-    cards.forEach(async (card) => {
+  // Run the batch sequentially in background
+  (async () => {
+    job.status = "running";
+    await saveDB();
+    
+    const gateways = getGateways();
+    const gw = gateways.find(g => g.id === job.gateway) || { name: job.gateway };
+
+    for (const card of cards) {
+      // Check for stop flag
+      if (job.status === "stopped") break;
+
       const r = Math.random();
       let status = r < 0.08 ? "approved" : r < 0.92 ? "declined" : "error";
+      let message = status === "approved" ? "APPROVED" : status === "declined" ? "Do Not Honor" : "Network Error";
+      
       job[status === "approved" ? "approved" : status === "declined" ? "declined" : "errors"]++;
       if (status === "approved") {
         job.charged++;
-        // Log to group for each hit in batch
-        const gateways = getGateways();
-        const gw = gateways.find(g => g.id === job.gateway) || { name: job.gateway };
-        notifyHitInGroup(user, gw.name, card, { elapsed: "0.1" });
+        await notifyHitInGroup(user, gw.name, card, { elapsed: "0.1" });
       }
+      
       job.processedCards++;
-      job.results.push({ card, status, message: status === "approved" ? "APPROVED" : status === "declined" ? "Do Not Honor" : "Network Error" });
-    });
-    job.status = "completed";
-    job.completedAt = Date.now();
-    saveDB();
-  }, 300 + cards.length * 80);
+      job.results.unshift({ 
+        id: Math.random().toString(36).substr(2, 9),
+        card, 
+        status, 
+        message,
+        timestamp: Date.now()
+      });
+      
+      await saveDB();
+      // Delay for "Live" effect
+      await new Promise(res => setTimeout(res, 800));
+    }
+    
+    if (job.status !== "stopped") {
+      job.status = "completed";
+      job.completedAt = Date.now();
+      await saveDB();
+    }
+  })();
 
-  res.json({ jobId, status: "pending" });
+  res.json({ jobId, status: "running" });
+});
+
+app.delete("/api/check/batch/:jobId", async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+  const job = DB.history.find((j) => j.jobId === req.params.jobId && j.userId === user.userId);
+  if (!job) return res.status(404).json({ error: "Not found" });
+  
+  job.status = "stopped";
+  job.completedAt = Date.now();
+  await saveDB();
+  res.json({ success: true, message: "Check stopped" });
 });
 
 app.get("/api/check/batch", (req, res) => {
@@ -798,7 +885,7 @@ app.post("/api/tools/stripe-co", async (req, res) => {
   if (!checkoutUrl || !card) return res.status(400).json({ error: "checkoutUrl and card required" });
 
   user.dailyUsage.hitterHits++;
-  saveDB();
+  await saveDB();
 
   const result = await hitStripeCheckout(checkoutUrl, card);
   if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
@@ -820,7 +907,7 @@ app.post("/api/tools/stripe-invoice", async (req, res) => {
   if (!invoiceUrl || !card) return res.status(400).json({ error: "invoiceUrl and card required" });
 
   user.dailyUsage.hitterHits++;
-  saveDB();
+  await saveDB();
 
   const result = await hitStripeCheckout(invoiceUrl, card);
   if (!result.session_cache && sessionCache) result.session_cache = sessionCache;
