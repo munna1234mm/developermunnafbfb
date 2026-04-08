@@ -448,7 +448,7 @@ async function handleBotMessage(msg) {
     return sendTelegramMessage(chatId, "❓ Unknown command.");
   }
 
-  // 3. Handle Card Strings (e.g. 4111222233334444|01|28|123)
+  // 3. Handle Card Strings (e.g. 4111222233334444|01|28|123 or AMEX 37xx|x|x|xxxx)
   const cardRegex = /\d{15,16}\|\d{2}\|\d{2,4}\|\d{3,4}/;
   if (cardRegex.test(text)) {
     const gatewayId = user.lastGateway || "skl"; // Fallback to skl
@@ -502,17 +502,20 @@ async function lookupBin(bin) {
   }
 }
 
-function luhnGenerate(bin) {
-  // Fill the middle digits with random numbers instead of zeros for realism
-  let partial = bin;
-  while (partial.length < 15) {
+function luhnGenerate(bin, length = 16) {
+  // Fill the digits until we reach (length - 1), the last digit will be the check digit
+  let partial = String(bin);
+  while (partial.length < length - 1) {
     partial += Math.floor(Math.random() * 10).toString();
   }
   
   let sum = 0;
   for (let i = 0; i < partial.length; i++) {
     let d = parseInt(partial[partial.length - 1 - i]);
-    if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; }
+    if (i % 2 === 0) { // Since we are at index i from the right (0-indexed), even i means 1st, 3rd... from right
+      d *= 2; 
+      if (d > 9) d -= 9; 
+    }
     sum += d;
   }
   const checkDigit = (10 - (sum % 10)) % 10;
@@ -520,8 +523,13 @@ function luhnGenerate(bin) {
 }
 
 function generateCard(bin, month, year, cvv) {
+  const binStr = String(bin);
+  const isAmex = binStr.startsWith("3");
+  const targetLength = isAmex ? 15 : 16;
+  const cvvLength = isAmex ? 4 : 3;
+
   // Ensure the card number is generated with high entropy using Luhn
-  const number = luhnGenerate(bin);
+  const number = luhnGenerate(binStr, targetLength);
   
   const m = month && month !== "xx" ? month : String(Math.floor(Math.random() * 12) + 1).padStart(2, "0");
   
@@ -529,8 +537,13 @@ function generateCard(bin, month, year, cvv) {
   const currentYear = new Date().getFullYear();
   const y = year && year !== "xx" ? year : String(currentYear + Math.floor(Math.random() * 5) + 1).slice(-2);
   
-  // Realistic CVV
-  const c = cvv && cvv !== "xxx" ? cvv : String(Math.floor(100 + Math.random() * 900));
+  // Realistic CVV based on card type
+  let c = cvv;
+  if (!c || c === "xxx" || c === "xxxx") {
+    const min = Math.pow(10, cvvLength - 1);
+    const max = Math.pow(10, cvvLength) - 1;
+    c = String(Math.floor(min + Math.random() * (max - min + 1)));
+  }
   
   return `${number}|${m}|${y}|${c}`;
 }
