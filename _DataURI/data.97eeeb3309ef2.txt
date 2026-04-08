@@ -1,0 +1,1 @@
+chrome-extension://ccbpbkebodcjkknkfkpmfeciinhidaeh/fonts/OpenSans-Semibold.woff2
