@@ -1072,13 +1072,41 @@ app.post("/api/user/settings", async (req, res) => {
   res.json({ success: true });
 });
 
-app.get("/api/user/avatar/:userId", (req, res) => {
-  res.setHeader("Content-Type", "image/svg+xml");
+app.get("/api/user/avatar/:userId", async (req, res) => {
   const id = req.params.userId;
-  const colors = ["#6366f1", "#8b5cf6", "#ec4899", "#14b8a6", "#f59e0b", "#3b82f6"];
-  const color = colors[parseInt(id.slice(-2), 16) % colors.length] || colors[0];
-  const initials = id.slice(0, 2).toUpperCase();
-  res.send(`<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><circle cx="40" cy="40" r="40" fill="${color}"/><text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="26" font-family="Arial,sans-serif">${initials}</text></svg>`);
+  const fallback = () => {
+    res.setHeader("Content-Type", "image/svg+xml");
+    const colors = ["#6366f1", "#8b5cf6", "#ec4899", "#14b8a6", "#f59e0b", "#3b82f6"];
+    const color = colors[parseInt(id.slice(-2), 16) % colors.length] || colors[0];
+    const initials = id.slice(0, 2).toUpperCase();
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><circle cx="40" cy="40" r="40" fill="${color}"/><text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="white" font-size="26" font-family="Arial,sans-serif">${initials}</text></svg>`;
+  };
+
+  try {
+    console.log(`📸 Fetching avatar for TG ID: ${id}`);
+    const photosRes = await fetch(`https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/getUserProfilePhotos?user_id=${id}&limit=1`);
+    const photosData = await photosRes.json();
+
+    if (photosData.ok && photosData.result.total_count > 0) {
+      const photos = photosData.result.photos[0];
+      const fileId = photos[0].file_id; 
+
+      const fileRes = await fetch(`https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/getFile?file_id=${fileId}`);
+      const fileData = await fileRes.json();
+
+      if (fileData.ok && fileData.result.file_path) {
+        const imgUrl = `https://api.telegram.org/file/bot${CONFIG.BOT_TOKEN}/${fileData.result.file_path}`;
+        const imgRes = await fetch(imgUrl);
+        const buffer = await imgRes.arrayBuffer();
+        res.setHeader("Content-Type", imgRes.headers.get("content-type") || "image/jpeg");
+        return res.send(Buffer.from(buffer));
+      }
+    }
+    res.send(fallback());
+  } catch (e) {
+    console.error("❌ Avatar Error:", e.message);
+    res.send(fallback());
+  }
 });
 
 // ── CHECKER ──
