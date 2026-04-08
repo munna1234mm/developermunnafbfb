@@ -399,13 +399,13 @@ async function notifyHitInGroup(user, gatewayName, card, result) {
   const merchant = cache.merchant || "Unknown";
   const product = cache.product ? `[${cache.product}]` : "";
 
-  const msg = `🔥 <b>HIT DETECTED</b> ⚡
+  const msg = `🔥🔥 <b>HIT DETECTED</b> ⚡️
 👤 <b>${user?.firstName || 'User'}</b> [${user?.tier?.toUpperCase() || 'FREE'}]
 ↔️ <b>Gateway:</b> ${gatewayName}
-✅ <b>Response:</b> Approved - Charged | ${binStr}
+✅ <b>Response:</b> Charged Successfully
+🌐 <b>Site:</b> ${merchant} ${product}
 💰 <b>Amount:</b> ${symbol}${amount}
-🏪 <b>Merchant:</b> ${merchant} ${product}
-⏱️ <b>Time:</b> ${result.elapsed}s
+
 <a href="https://t.me/superhitbdrobot/bd_superhits">Open HIT Checker</a>`;
 
   return sendTelegramMessage(logsGroupId, msg, true).catch(e => console.error("Notification Error:", e.message));
