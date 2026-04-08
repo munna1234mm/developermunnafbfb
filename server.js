@@ -146,9 +146,14 @@ async function loadDB() {
     const dbRef = ref(db);
     const snapshot = await get(child(dbRef, "system"));
     if (snapshot.exists()) {
-      const cloudData = snapshot.val();
       DB = Object.assign(DB, cloudData);
-      console.log("✅ Data loaded from Firebase");
+      
+      // Data Migration: Ensure all users have a totalHits field for ranking
+      Object.values(DB.users).forEach(u => {
+        if (u.totalHits === undefined) u.totalHits = 0;
+      });
+      
+      console.log("✅ Data loaded and migrated from Firebase");
     } else {
       console.log("ℹ️ No data in Firebase. Starting fresh.");
       await saveDB(); // Initialize cloud with defaults
@@ -801,19 +806,27 @@ async function automatedHit(url, card) {
     if (!submitted) throw new Error("Pay button not found");
 
     // 4. Polling for Result
-    console.log("⏳ Catching Result...");
-    for (let i = 0; i < 15; i++) {
+    console.log("⏳ Catching Result (Improved Detection)...");
+    const successWords = ["confirmed", "success", "thank you", "complete", "paid", "verified", "authorized", "successful", "congratulations", "processed"];
+    const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid", "expired", "rejected", "insufficient", "denied", "restricted"];
+    
+    for (let i = 0; i < 30; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const currentUrl = page.url();
-      const bodyText = await page.evaluate(() => document.body.innerText);
-      const lowBody = bodyText.toLowerCase();
+      
+      // Check content in ALL frames
+      const frameContents = await Promise.all(page.frames().map(async (frame) => {
+        try {
+          return await frame.evaluate(() => document.body ? document.body.innerText : "");
+        } catch { return ""; }
+      }));
+      const lowBody = frameContents.join(" ").toLowerCase();
 
       if (currentUrl.includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
         console.log("🛡️ 3DS Authentication Detected!");
         return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
       }
 
-      const successWords = ["confirmed", "success", "thank you", "complete", "paid"];
       if (successWords.some(w => lowBody.includes(w))) {
         console.log("✅ Charge Successful!");
         const chargedRes = { status: "charged", message: "Charged Successfully", elapsed: "Real" };
@@ -821,18 +834,18 @@ async function automatedHit(url, card) {
         return chargedRes;
       }
 
-      const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid", "expired"];
       if (failWords.some(w => lowBody.includes(w))) {
         console.log("❌ Charge Declined/Failed!");
         return { status: "live_declined", message: "Card Declined / Failed", elapsed: "Real" };
       }
       
-      if (i % 5 === 0) console.log(`⏳ Still waiting... (${i}s)`);
+      if (i % 5 === 0) console.log(`⏳ Still waiting for result... (${i}s)`);
     }
 
     console.log("⚠️ Transaction timed out without clear status.");
     const finalResult = { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
-    finalResult.metadata = await extractMetadata(page); // Final metadata check
+    finalResult.metadata = await extractMetadata(page); 
+    finalResult.finalUrl = page.url(); // Add final URL to help debug
     return finalResult;
 
   } catch (e) {
