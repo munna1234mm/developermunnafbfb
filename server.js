@@ -12,8 +12,8 @@ const PORT = 3001;
 // CONFIG
 // ================================================
 const CONFIG = {
-  BOT_TOKEN: "8650858792:AAEarU0k6jsaNOvHn4ChuyZ7B6PDYPi7w6k",
-  BOT_USERNAME: "dfvmdkfvdknfvkrobot",   // @ ছাড়া
+  BOT_TOKEN: "8765279954:AAEkjrX2EqeAnle7lFRCLEsGQjpvoNJwwzU",
+  BOT_USERNAME: "@superhitbdrobot",   // @ ছাড়া
   ADMIN_IDS: [8766583877],
   ADMIN_PIN: "Munna1234@@@",              // ← Admin Panel PIN
   OTP_EXPIRE_MINUTES: 5,
