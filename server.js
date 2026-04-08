@@ -825,19 +825,24 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
 
     log(`📡 Navigating to: ${new URL(url).hostname}...`);
     // 'load' is safer than 'networkidle2' for Stripe checkouts to avoid hangs on telemetry trackers
-    await page.goto(url, { waitUntil: "load", timeout: 45000 }).catch(() => {
+    await page.goto(url, { waitUntil: "load", timeout: 60000 }).catch(() => {
         log("⚠️ Site loading slowly, proceeding...");
     });
     // Give a short grace period for scripts to init
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 2000));
 
     log("🛡️ Identifying Provider...");
     const provider = await identifyProvider(page);
-    log(`🛡️ Detected: ${provider}`);
-
-    log("🔍 Identifying Payment Form...");
+    
+    log("🔍 Extracting Checkout Info...");
     const metadata = await extractMetadata(page);
-    if (metadata.hasCaptcha) log("⚠️ Captcha Detected!");
+    
+    // 📢 LIVE INFO: Show real checkout data to the user immediately
+    const merchant = metadata.product || new URL(url).hostname;
+    const priceText = metadata.amount !== "0" ? `${metadata.amount} ${metadata.currency.toUpperCase()}` : "Dynamic Price";
+    log(`🛒 MERCHANT: ${merchant}`);
+    log(`💰 AMOUNT: ${priceText}`);
+    if (metadata.hasCaptcha) log("⚠️ Captcha Detected! Solving...");
 
     const info = generateRandomInfo();
 
@@ -1015,15 +1020,17 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
     return finalResult;
   })();
 
-  // ⚙️ 120s PROTECTION WRAPPER
+  // ⚙️ PROTECTION WRAPPER: Avoid deadlocking the server
   const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error("Automation Timeout (120s limit exceeded)")), 120000);
+    setTimeout(() => reject(new Error("Hitter Timeout (Could not finish in 150s)")), 150000);
   });
 
   try {
     return await Promise.race([hitterPromise, timeoutPromise]);
   } catch (e) {
     log(`💥 Error: ${e.message}`);
+    // Ensure cleanup happens even on race timeout
+    if (browser) await browser.close().catch(() => {});
     return { status: "error", message: e.message, elapsed: "N/A" };
   } finally {
     if (browser) {
