@@ -146,6 +146,7 @@ async function loadDB() {
     const dbRef = ref(db);
     const snapshot = await get(child(dbRef, "system"));
     if (snapshot.exists()) {
+      const cloudData = snapshot.val();
       DB = Object.assign(DB, cloudData);
       
       // Data Migration: Ensure all users have necessary fields
