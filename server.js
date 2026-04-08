@@ -870,7 +870,23 @@ app.get("/api/activity/recent", (req, res) => res.json([]));
 app.get("/api/referral", (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
-  res.json({ code: `REF${user.userId}`, link: `http://localhost:${PORT}/?ref=REF${user.userId}`, balance: 0, totalEarned: 0, referredCount: 0, redeemedHistory: [] });
+  
+  if (!user.referral) {
+    user.referral = { balance: 0, totalEarned: 0, referredCount: 0, redeemedHistory: [] };
+  }
+  
+  const refCode = `REF${user.userId}`;
+  const miniAppUrl = `https://t.me/superhitbdrobot/bd_superhits`;
+  const shareLink = `${miniAppUrl}?startapp=${refCode}`;
+
+  res.json({ 
+    code: refCode, 
+    link: shareLink, 
+    balance: user.referral.balance || 0, 
+    totalEarned: user.referral.totalEarned || 0, 
+    referredCount: user.referral.referredCount || 0, 
+    redeemedHistory: user.referral.redeemedHistory || [] 
+  });
 });
 app.get("/api/shopify/sites", (req, res) => res.json([]));
 app.get("/api/skool/accounts", (req, res) => res.json([]));
