@@ -99,6 +99,23 @@ function parseCookies(req) {
 const frontendPath = path.join(__dirname, "hitchecker.top");
 app.use(express.static(frontendPath));
 
+// Clean up old screenshots (> 24h)
+setInterval(() => {
+  const screenshotsDir = path.join(frontendPath, "screenshots");
+  if (!fs.existsSync(screenshotsDir)) return;
+  
+  const files = fs.readdirSync(screenshotsDir);
+  const now = Date.now();
+  files.forEach(file => {
+     const filePath = path.join(screenshotsDir, file);
+     const stats = fs.statSync(filePath);
+     if (now - stats.mtimeMs > 24 * 60 * 60 * 1000) {
+       fs.unlinkSync(filePath);
+       console.log(`🧹 Cleaned up old screenshot: ${file}`);
+     }
+  });
+}, 3600000); // Check every hour
+
 // ──────────────────────────────────────────────
 // Persistent data store
 // ──────────────────────────────────────────────
@@ -126,7 +143,13 @@ let DB = {
   maintenance: false,
   siteVisible: true,
   gateways: null,           // null = use DEFAULT_GATEWAYS
-  botSettings: { mass_check_enabled: true, inline_mass_limit: 10, file_mass_limit: 300 },
+  botSettings: { 
+    mass_check_enabled: true, 
+    inline_mass_limit: 10, 
+    file_mass_limit: 300,
+    proxyEnabled: false,
+    proxyUrl: ""
+  },
   botConfig:   { groupId: "", groupLink: "", channelLink: "", logsGroupId: "" },
   nopechaKey: "",
   captchaaiKey: "",
@@ -154,6 +177,14 @@ async function loadDB() {
         if (u.totalHits === undefined) u.totalHits = 0;
         if (!u.photoUrl) u.photoUrl = `/api/user/avatar/${u.userId}`;
       });
+
+      // Proxy Config Migration
+      if (!DB.botSettings) DB.botSettings = {};
+      if (DB.botSettings.proxyEnabled === undefined) DB.botSettings.proxyEnabled = false;
+      if (DB.botSettings.proxyUrl === undefined) DB.botSettings.proxyUrl = "";
+      
+      // Session Persistence: Ensure sessions object exists
+      if (!DB.sessions) DB.sessions = {};
       
       console.log("✅ Data loaded and migrated from Firebase");
     } else {
@@ -165,27 +196,30 @@ async function loadDB() {
   }
 }
 
-async function saveDB() {
+async function saveDB(cloudSync = true) {
   try {
     // Save to local for fast access
     fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(DB, null, 2));
     
-    // Save to Firebase for persistence across deploys
-    const dbRef = ref(db, "system");
-    const dataToSave = {
-      users: DB.users,
-      history: DB.history,
-      bins: DB.bins,
-      gateways: DB.gateways || DEFAULT_GATEWAYS,
-      botConfig: DB.botConfig,
-      botSettings: DB.botSettings,
-      blacklistedBins: DB.blacklistedBins || [],
-      maintenance: DB.maintenance,
-      globalHits: DB.globalHits || 0
-    };
-    await set(dbRef, dataToSave);
+    if (cloudSync) {
+      // Save to Firebase for persistence across deploys (Only when needed)
+      const dbRef = ref(db, "system");
+      const dataToSave = {
+        users: DB.users,
+        sessions: DB.sessions || {},
+        history: DB.history,
+        bins: DB.bins,
+        gateways: DB.gateways || DEFAULT_GATEWAYS,
+        botConfig: DB.botConfig,
+        botSettings: DB.botSettings,
+        blacklistedBins: DB.blacklistedBins || [],
+        maintenance: DB.maintenance,
+        globalHits: DB.globalHits || 0
+      };
+      await set(dbRef, dataToSave);
+    }
   } catch (e) {
-    console.error("Firebase Save Error:", e.message);
+    console.error("Save Error:", e.message);
   }
 }
 
@@ -376,6 +410,21 @@ async function sendTelegramMessage(chatId, text, disablePreview = false) {
   return res.json();
 }
 
+async function sendTelegramPhoto(chatId, photoUrl, caption = "") {
+  const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/sendPhoto`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ 
+      chat_id: chatId, 
+      photo: photoUrl, 
+      caption,
+      parse_mode: "HTML"
+    }),
+  });
+  return res.json();
+}
+
 async function getTelegramUser(userId) {
   const url = `https://api.telegram.org/bot${CONFIG.BOT_TOKEN}/getChat`;
   const res = await fetch(url, {
@@ -409,6 +458,14 @@ async function notifyHitInGroup(user, gatewayName, card, result) {
 💰 <b>Amount:</b> ${symbol}${amount}
 
 <a href="https://t.me/superhitbdrobot/bd_superhits">Open HIT Checker</a>`;
+
+  if (result.screenshot) {
+     const fullScreenshotUrl = `${DB.botSettings.baseUrl || "https://hitchecker.top"}/screenshots/${result.screenshot}`;
+     return sendTelegramPhoto(logsGroupId, fullScreenshotUrl, msg).catch(e => {
+        console.error("Photo Notification Error:", e.message);
+        return sendTelegramMessage(logsGroupId, msg, true);
+     });
+  }
 
   return sendTelegramMessage(logsGroupId, msg, true).catch(e => console.error("Notification Error:", e.message));
 }
@@ -654,35 +711,61 @@ async function identifyProvider(page) {
 async function extractMetadata(page) {
   try {
     const data = await page.evaluate(() => {
+      const textContent = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      const html = document.documentElement?.innerHTML || "";
+      
       let amount = "0", currency = "usd", product = "", stripePk = "";
       
-      // Look for Stripe's internal JSON and Public Key
-      const scripts = document.querySelectorAll('script');
-      for (const s of scripts) {
-        const c = s.textContent || "";
-        // Extract Amount and Currency
-        if (c.includes('"amount_due"') || c.includes('"total"')) {
-           const am = c.match(/"amount_due"\s*:\s*(\d+)/) || c.match(/"total"\s*:\s*(\d+)/);
-           const cu = c.match(/"currency"\s*:\s*"(\w+)"/);
-           if (am) amount = (parseInt(am[1]) / 100).toFixed(2);
-           if (cu) currency = cu[1];
-        }
-        // Extract Stripe Public Key (pk_live_...)
-        const pkMatch = c.match(/(pk_live_[a-zA-Z0-9]{24,})/);
-        if (pkMatch) stripePk = pkMatch[1];
-      }
+      // 1. Advanced Product Name Detection
+      product =
+        document.querySelector('[itemprop="name"]')?.textContent?.trim() ||
+        document.querySelector('meta[property="og:title"]')?.getAttribute("content")?.trim() ||
+        document.querySelector("h1")?.textContent?.trim() ||
+        document.querySelector('[class*="Product"], [class*="Merchant"], .header-business-name')?.innerText?.trim() ||
+        "";
 
-      // Look for DOM elements if JSON fails
+      // 2. High-Fidelity Amount & Currency Detection (LD+JSON)
+      try {
+        const ldScripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+        for (const s of ldScripts) {
+          const parsed = JSON.parse(s.textContent || "null");
+          const items = Array.isArray(parsed) ? parsed : [parsed];
+          for (const item of items) {
+            if (!item) continue;
+            const offer = item.offers || item;
+            if (offer && (offer.price || offer.priceCurrency)) {
+              if (offer.price) amount = String(offer.price).trim();
+              if (offer.priceCurrency) currency = String(offer.priceCurrency).trim().toLowerCase();
+            }
+          }
+        }
+      } catch (err) {}
+
+      // 3. Fallback: Stripe Metadata Scripts
       if (amount === "0") {
-        const amEl = document.querySelector('[class*="Amount"], [class*="total"], .total-amount');
-        if (amEl) {
-           const match = amEl.innerText.match(/[\d,.]+/);
-           if (match) amount = match[0];
+        const scripts = document.querySelectorAll('script');
+        for (const s of scripts) {
+          const c = s.textContent || "";
+          if (c.includes('"amount_due"') || c.includes('"total"')) {
+             const am = c.match(/"amount_due"\s*:\s*(\d+)/) || c.match(/"total"\s*:\s*(\d+)/);
+             const cu = c.match(/"currency"\s*:\s*"(\w+)"/);
+             if (am) amount = (parseInt(am[1]) / 100).toFixed(2);
+             if (cu) currency = cu[1].toLowerCase();
+          }
+          const pkMatch = c.match(/(pk_live_[a-zA-Z0-9]{24,})/);
+          if (pkMatch) stripePk = pkMatch[1];
         }
       }
 
-      const prodEl = document.querySelector('[class*="Product"], [class*="Merchant"], .header-business-name');
-      if (prodEl) product = prodEl.innerText.trim();
+      // 4. Fallback: Regex Match on Text (Improved)
+      if (amount === "0") {
+        const amountRegex = /\b(?:total|amount due|pay|price)\b[^0-9]{0,20}([$€£¥₹]|USD|EUR|GBP|JPY|INR)?\s*([0-9]+(?:[.,][0-9]{2})?)/i;
+        const match = textContent.match(amountRegex);
+        if (match) {
+          amount = match[2];
+          if (match[1]) currency = match[1].length > 1 ? match[1].toLowerCase() : currency;
+        }
+      }
 
       const hasCaptcha = !!document.querySelector('iframe[src*="captcha"], iframe[src*="recaptcha"]');
       const has3DS = !!document.querySelector('iframe[src*="3d_secure"], [class*="3ds"], [id*="3ds"]');
@@ -701,20 +784,42 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
   
   const hitterPromise = (async () => {
     log("🚀 Initializing Hitter Engine...");
+    
+    // 🌐 Proxy Logic Integration
+    const launchArgs = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+      "--disable-gpu"
+    ];
+
+    let proxyAuth = null;
+    if (DB.botSettings.proxyEnabled && DB.botSettings.proxyUrl) {
+      try {
+        const proxyUrl = new URL(DB.botSettings.proxyUrl);
+        launchArgs.push(`--proxy-server=${proxyUrl.protocol}//${proxyUrl.host}`);
+        if (proxyUrl.username && proxyUrl.password) {
+           proxyAuth = { username: proxyUrl.username, password: proxyUrl.password };
+        }
+        log(`📡 Using Proxy: ${proxyUrl.hostname}`);
+      } catch (e) {
+        log(`⚠️ Proxy Config Error: ${e.message}`);
+      }
+    }
+
     browser = await puppeteer.launch({
       headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--no-first-run",
-        "--no-zygote",
-        "--single-process",
-        "--disable-gpu"
-      ]
+      args: launchArgs
     });
+    
     const page = await browser.newPage();
+    if (proxyAuth) {
+       await page.authenticate(proxyAuth);
+    }
     await page.setViewport({ width: 1440, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
@@ -842,7 +947,18 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
 
       if (successWords.some(w => lowBody.includes(w))) {
         log("✅ HIT SUCCESSFUL!");
-        const chargedRes = { status: "charged", message: "Charged Successfully", elapsed: "Real" };
+        
+        // Capture Visual Proof
+        const screenshotFilename = `hit_${Date.now()}_${Math.random().toString(36).substr(2, 5)}.png`;
+        const screenshotPath = path.join(frontendPath, "screenshots", screenshotFilename);
+        await page.screenshot({ path: screenshotPath, fullPage: false }).catch(() => {});
+        
+        const chargedRes = { 
+          status: "charged", 
+          message: "Charged Successfully", 
+          elapsed: "Real",
+          screenshot: screenshotFilename 
+        };
         chargedRes.metadata = await extractMetadata(page);
         return chargedRes;
       }
@@ -1169,7 +1285,7 @@ app.post("/api/check/batch", async (req, res) => {
         console.log(`📡 [BATCH] Hitting: ${card.slice(0, 6)}...`);
         const result = await hitStripeCheckout(checkoutUrl, card, user, async (m) => {
            job.message = `${job.processedCards + 1}/${job.totalCards}: ${m}`;
-           await saveDB();
+           await saveDB(false); // Fast local update
         });
         
         // Map status for the batch job
@@ -1188,10 +1304,11 @@ app.post("/api/check/batch", async (req, res) => {
           card, 
           status, 
           message,
+          elapsed: result.elapsed,
           timestamp: Date.now()
         });
         
-        await saveDB(); // Ensure persistent after each card result
+        await saveDB(true); // Persist full results to cloud after each card
       } catch (e) {
         console.error(`❌ Batch Error: ${e.message}`);
         job.errors++;
