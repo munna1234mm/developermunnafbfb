@@ -824,12 +824,17 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
     log(`📡 Navigating to: ${new URL(url).hostname}...`);
-    // 'load' is safer than 'networkidle2' for Stripe checkouts to avoid hangs on telemetry trackers
-    await page.goto(url, { waitUntil: "load", timeout: 60000 }).catch(() => {
-        log("⚠️ Site loading slowly, proceeding...");
+
+    // ── PHASE 1: domcontentloaded (fast, like ALDEN-HITTER) ──
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {
+        log("⚠️ Initial load slow, still continuing...");
     });
-    // Give a short grace period for scripts to init
-    await new Promise(r => setTimeout(r, 2000));
+
+    // ── PHASE 2: Wait for network to calm down, but cap at 8s so trackers can't hang us ──
+    await Promise.race([
+      page.waitForNetworkIdle({ idleTime: 1000 }).catch(() => {}),
+      new Promise(r => setTimeout(r, 8000))
+    ]);
 
     log("🛡️ Identifying Provider...");
     const provider = await identifyProvider(page);
