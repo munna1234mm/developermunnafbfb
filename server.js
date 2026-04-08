@@ -415,21 +415,35 @@ async function lookupBin(bin) {
 }
 
 function luhnGenerate(bin) {
-  const partial = (bin + "0".repeat(15 - bin.length)).slice(0, 15);
+  // Fill the middle digits with random numbers instead of zeros for realism
+  let partial = bin;
+  while (partial.length < 15) {
+    partial += Math.floor(Math.random() * 10).toString();
+  }
+  
   let sum = 0;
   for (let i = 0; i < partial.length; i++) {
     let d = parseInt(partial[partial.length - 1 - i]);
     if (i % 2 === 0) { d *= 2; if (d > 9) d -= 9; }
     sum += d;
   }
-  return partial + ((10 - (sum % 10)) % 10);
+  const checkDigit = (10 - (sum % 10)) % 10;
+  return partial + checkDigit;
 }
 
 function generateCard(bin, month, year, cvv) {
+  // Ensure the card number is generated with high entropy using Luhn
   const number = luhnGenerate(bin);
+  
   const m = month && month !== "xx" ? month : String(Math.floor(Math.random() * 12) + 1).padStart(2, "0");
-  const y = year && year !== "xx" ? year : String(new Date().getFullYear() + Math.floor(Math.random() * 6)).slice(-2);
+  
+  // Realistic years (Next 2-6 years)
+  const currentYear = new Date().getFullYear();
+  const y = year && year !== "xx" ? year : String(currentYear + Math.floor(Math.random() * 5) + 1).slice(-2);
+  
+  // Realistic CVV
   const c = cvv && cvv !== "xxx" ? cvv : String(Math.floor(100 + Math.random() * 900));
+  
   return `${number}|${m}|${y}|${c}`;
 }
 
