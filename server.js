@@ -7,6 +7,7 @@ const fetch = (...args) =>
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+let serverStarted = false;
 
 // ================================================
 // CONFIG
@@ -166,6 +167,9 @@ loadDB().then(() => {
   });
 
   // Start server after DB load
+  if (serverStarted) return;
+  serverStarted = true;
+  
   app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════╗
