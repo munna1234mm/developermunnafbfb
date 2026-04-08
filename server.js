@@ -824,10 +824,12 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
     log(`📡 Navigating to: ${new URL(url).hostname}...`);
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 }).catch(() => {
+    // 'load' is safer than 'networkidle2' for Stripe checkouts to avoid hangs on telemetry trackers
+    await page.goto(url, { waitUntil: "load", timeout: 45000 }).catch(() => {
         log("⚠️ Site loading slowly, proceeding...");
     });
-    await new Promise(r => setTimeout(r, 2000));
+    // Give a short grace period for scripts to init
+    await new Promise(r => setTimeout(r, 1500));
 
     log("🛡️ Identifying Provider...");
     const provider = await identifyProvider(page);
@@ -950,21 +952,26 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
 
     if (!submitted) throw new Error("Pay button not found");
 
-    // 4. Polling for Result
+    // 4. Polling for Result (Optimized)
     log("⏳ Awaiting Outcome...");
-    const successWords = ["confirmed", "success", "thank you", "complete", "paid", "verified", "authorized", "successful", "congratulations", "processed"];
-    const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid", "expired", "rejected", "insufficient", "denied", "restricted"];
+    const successWords = ["confirmed", "success", "thank you", "complete", "paid", "verified", "authorized", "successful", "congratulations", "processed", "received", "order id", "receipt"];
+    const failWords = ["declined", "fail", "error", "could not be processed", "incorrect", "invalid", "expired", "rejected", "insufficient", "denied", "restricted", "card was declined", "payment failed", "something went wrong"];
     
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 1000));
+    // Total 60 segments (30 seconds) with faster polling (500ms)
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 500));
       const currentUrl = page.url();
       
       const frameContents = await Promise.all(page.frames().map(async (frame) => {
         try {
-          return await frame.evaluate(() => document.body ? document.body.innerText : "");
+          return await frame.evaluate(() => {
+            const low = (document.body?.innerText || "").toLowerCase();
+            const tit = (document.title || "").toLowerCase();
+            return low + " " + tit;
+          });
         } catch { return ""; }
       }));
-      const lowBody = frameContents.join(" ").toLowerCase();
+      const lowBody = frameContents.join(" ");
 
       if (currentUrl.includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
         log("🛡️ 3DS Authentication Required.");
@@ -994,7 +1001,7 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
         return { status: "live_declined", message: "Card Declined / Failed", elapsed: "Real" };
       }
       
-      if (i % 5 === 0) log(`⏳ Processing... (${i}s)`);
+      if (i % 10 === 0) log(`⏳ Processing... (${(i/2).toFixed(1)}s)`);
     }
 
     log("⚠️ Completion Timeout.");
