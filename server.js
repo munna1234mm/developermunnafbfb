@@ -839,88 +839,114 @@ async function automatedHit(url, card, log = (m) => console.log(m)) {
 
     const info = generateRandomInfo();
 
-    // 1. Fill Fields (Email, Name)
-    log("📝 Filling Customer Info...");
-    for (const sel of HITTER_SELECTORS.email) {
-      if (await page.$(sel)) {
-        await page.type(sel, info.email, { delay: 30 });
-        break;
-      }
-    }
-    for (const sel of HITTER_SELECTORS.name) {
-      if (await page.$(sel)) {
-        await page.type(sel, info.name, { delay: 30 });
-        break;
-      }
-    }
+    // 🚀 USAGI-ENGINE EXECUTION BLOCK
+    log("🧪 Running Usagi-Engine Automation...");
+    const success = await page.evaluate(async (card, info) => {
+      const wait = (ms) => new Promise(res => setTimeout(res, ms));
+      
+      // Native Value Setter to bypass framework state locks
+      const simInput = (el, val) => {
+        if (!el) return;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+        if (setter) setter.call(el, val);
+        else el.value = val;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("blur", { bubbles: true }));
+      };
 
-    // 2. Card Handling (Standalone or iFrame)
-    log("💳 Handling Payment Card...");
-    const cardFrame = page.frames().find(f => f.url().includes("stripe.com") && f.name().includes("private-stripe-frame"));
-    const target = cardFrame || page;
-    if (cardFrame) log("📦 Using Stripe Secure Iframe.");
+      const type = async (text) => {
+        for (const char of text) {
+          const opt = { key: char, bubbles: true };
+          document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", opt));
+          document.activeElement?.dispatchEvent(new KeyboardEvent("keypress", opt));
+          if (document.activeElement && 'value' in document.activeElement) {
+             const start = document.activeElement.selectionStart;
+             const end = document.activeElement.selectionEnd;
+             document.activeElement.value = document.activeElement.value.slice(0, start) + char + document.activeElement.value.slice(end);
+          }
+          document.activeElement?.dispatchEvent(new Event("input", { bubbles: true }));
+          document.activeElement?.dispatchEvent(new KeyboardEvent("keyup", opt));
+          await wait(15);
+        }
+      };
 
-    let filledCard = false;
-    for (const sel of HITTER_SELECTORS.card) {
-      try {
-        if (await target.waitForSelector(sel, { timeout: 5000 }).catch(() => null)) {
-          log(`✨ Entering Card details...`);
-          await target.focus(sel);
-          await target.type(sel, parsed.number, { delay: 30 });
-          filledCard = true;
-          break;
-        }
-      } catch (e) {}
-    }
+      const pressTab = async () => {
+        const opt = { key: "Tab", code: "Tab", keyCode: 9, bubbles: true };
+        document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", opt));
+        document.activeElement?.dispatchEvent(new KeyboardEvent("keyup", opt));
+        await wait(100);
+      };
 
-    if (filledCard) {
-      // Logic for Expiry and CVC
-      for (const sel of HITTER_SELECTORS.expiry) {
-        if (await target.$(sel)) {
-          console.log(`📅 Filling Expiry (${sel})...`);
-          await target.focus(sel);
-          await target.type(sel, `${parsed.month}${parsed.year.slice(-2)}`, { delay: 30 });
-          break;
-        }
+      // 1. Fill Customer Info
+      const emailSels = ['input[type="email"]', '[name*="email"]', '[autocomplete="email"]', '#email'];
+      const nameSels = ['[name*="name"]', '[autocomplete*="name"]', '#billingName', '#name'];
+      
+      for (const s of emailSels) { 
+        const el = document.querySelector(s);
+        if (el) { simInput(el, info.email); break; }
       }
-      for (const sel of HITTER_SELECTORS.cvc) {
-        if (await target.$(sel)) {
-          console.log(`🔒 Filling CVC (${sel})...`);
-          await target.focus(sel);
-          await target.type(sel, parsed.cvv, { delay: 30 });
-          break;
-        }
+      for (const s of nameSels) { 
+        const el = document.querySelector(s);
+        if (el) { simInput(el, info.name); break; }
       }
-    } else {
-      // Fallback: Try "Tab and Type" strategy if fields are combined or elusive
-      console.log("⚠️ Direct card detection failed, trying Tab strategy...");
-      const possibleWrappers = ['[class*="StripeElement"]', '[class*="CardElement"]', '.card-field'];
-      for (const wrap of possibleWrappers) {
-        const el = await target.$(wrap);
-        if (el) {
-          await el.click();
-          await page.keyboard.type(parsed.number, { delay: 20 });
-          await page.keyboard.press('Tab');
-          await page.keyboard.type(`${parsed.month}${parsed.year.slice(-2)}`, { delay: 20 });
-          await page.keyboard.press('Tab');
-          await page.keyboard.type(parsed.cvv, { delay: 20 });
-          filledCard = true;
-          break;
-        }
+
+      // 2. Stripe Card Handling (The "Usagi" Way)
+      const cardSels = [
+        '[class*="CardNumber"] input', '[name="cardNumber"]', '[autocomplete="cc-number"]',
+        'input[placeholder*="0000"]', 'input[placeholder*="Card number"]'
+      ];
+
+      let cardField = null;
+      for (const s of cardSels) {
+        const el = document.querySelector(s);
+        if (el) { cardField = el; break; }
       }
-    }
+
+      // If not in main doc, look for any stripe iframe and try to click it to gain focus
+      if (!cardField) {
+        const iframes = Array.from(document.querySelectorAll('iframe[src*="stripe.com"]'));
+        for (const f of iframes) {
+          f.click();
+          await wait(100);
+          if (document.activeElement?.tagName === "IFRAME") break;
+        }
+      } else {
+        cardField.click();
+        cardField.focus();
+      }
+
+      await wait(500);
+      // Type card, Tab to MMYY, Tab to CVC
+      await type(card.number);
+      await pressTab();
+      await type(card.month + card.year.slice(-2));
+      await pressTab();
+      await type(card.cvv);
+      
+      return true;
+    }, { number: parsed.number, month: parsed.month, year: parsed.year, cvv: parsed.cvv }, info).catch(e => {
+       console.error("Usagi-Engine Error:", e.message);
+       return false;
+    });
+    
+    if (!success) log("⚠️ Usagi-Engine reported partial failure, proceeding to submit anyway...");
+    else log("✅ Fields filled via Usagi-Engine.");
 
     // 3. Submit
     log("🚀 Processing Transaction...");
-    let submitted = false;
-    for (const sel of HITTER_SELECTORS.submit) {
-      const btn = await page.$(sel);
-      if (btn) {
-        await btn.click({ delay: 100 });
-        submitted = true;
-        break;
-      }
-    }
+    const submitted = await page.evaluate(async () => {
+       const sels = ['.SubmitButton', '[class*="SubmitButton"]', 'button[type="submit"]', '[data-testid*="submit"]', '[data-testid*="pay"]'];
+       for (const s of sels) {
+         const btn = document.querySelector(s);
+         if (btn) {
+           const actualBtn = btn.closest('button') || btn;
+           actualBtn.click();
+           return true;
+         }
+       }
+       return false;
+    });
 
     if (!submitted) throw new Error("Pay button not found");
 
