@@ -130,6 +130,7 @@ let DB = {
   botConfig:   { groupId: "", groupLink: "", channelLink: "", logsGroupId: "" },
   nopechaKey: "",
   captchaaiKey: "",
+  globalHits: 0,
 };
 
 async function loadDB() {
@@ -164,16 +165,18 @@ async function saveDB() {
     
     // Save to Firebase for persistence across deploys
     const dbRef = ref(db, "system");
-    DB.users = cloudDB.users || {};
-    DB.sessions = {}; 
-    DB.history = cloudDB.history || [];
-    DB.bins = cloudDB.bins || {};
-    DB.gateways = cloudDB.gateways || DEFAULT_GATEWAYS;
-    DB.botConfig = cloudDB.botConfig || { groupId: "-100", logsGroupId: "-100", groupLink: "", channelLink: "" };
-    DB.botSettings = cloudDB.botSettings || { mass_check_enabled: true, inline_mass_limit: 10, file_mass_limit: 100 };
-    DB.blacklistedBins = cloudDB.blacklistedBins || [];
-    DB.maintenance = cloudDB.maintenance || false;
-    await set(dbRef, DB);
+    const dataToSave = {
+      users: DB.users,
+      history: DB.history,
+      bins: DB.bins,
+      gateways: DB.gateways || DEFAULT_GATEWAYS,
+      botConfig: DB.botConfig,
+      botSettings: DB.botSettings,
+      blacklistedBins: DB.blacklistedBins || [],
+      maintenance: DB.maintenance,
+      globalHits: DB.globalHits || 0
+    };
+    await set(dbRef, dataToSave);
   } catch (e) {
     console.error("Firebase Save Error:", e.message);
   }
@@ -305,7 +308,8 @@ function newUser(tgUser) {
       totalEarned: 0,
       referredCount: 0,
       redeemedHistory: []
-    }
+    },
+    totalHits: 0,
   };
 }
 
@@ -863,6 +867,13 @@ async function hitStripeCheckout(checkoutUrl, card, user = null) {
       pk: "pk_live_auto_detected"
     };
     
+    // Update persistent stats
+    DB.globalHits = (DB.globalHits || 0) + 1;
+    if (user) {
+      user.totalHits = (user.totalHits || 0) + 1;
+    }
+    await saveDB();
+
     if (DB.botConfig.logsGroupId) {
        notifyHitInGroup(user, "Stripe Real-Time", card, result);
     }
@@ -1433,6 +1444,27 @@ app.delete("/api/admin/users/:userId", (req, res) => {
   });
   saveDB();
   res.json({ success: true });
+});
+
+app.get("/api/user/stats", (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+
+  const users = Object.values(DB.users);
+  const totalUsers = users.length;
+  const globalHits = DB.globalHits || 0;
+  
+  // Calculate Rank
+  const sortedUsers = [...users].sort((a, b) => (b.totalHits || 0) - (a.totalHits || 0));
+  const rankIndex = sortedUsers.findIndex(u => u.userId === user.userId);
+  const rank = rankIndex === -1 ? users.length : rankIndex + 1;
+
+  res.json({
+    totalUsers,
+    totalHits: globalHits,
+    yourHits: user.totalHits || 0,
+    yourRank: `#${rank}`
+  });
 });
 
 app.get("/api/admin/stats", (req, res) => {
